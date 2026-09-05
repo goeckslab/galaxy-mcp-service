@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 
-export const HISTORY_SUMMARY_URI = "ui://galaxy/history-summary-v9.html";
+export const HISTORY_SUMMARY_URI = "ui://galaxy/history-summary-v10.html";
 
 const LEGACY_HISTORY_SUMMARY_URIS = [
   "ui://galaxy/history-summary-v1.html",
@@ -11,6 +11,7 @@ const LEGACY_HISTORY_SUMMARY_URIS = [
   "ui://galaxy/history-summary-v6.html",
   "ui://galaxy/history-summary-v7.html",
   "ui://galaxy/history-summary-v8.html",
+  "ui://galaxy/history-summary-v9.html",
 ] as const;
 
 const MIME_TYPE = "text/html;profile=mcp-app";
@@ -58,6 +59,8 @@ const HTML = `<!doctype html>
     .badge::before { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent); content: ""; }
     .badge[data-state="connected"] { color: var(--success); }
     .badge[data-state="error"] { color: var(--danger); }
+    .badge[data-state="running"] { color: var(--accent); }
+    .badge[data-state="unknown"] { color: var(--orange); }
     .instance, .message, .meta { color: var(--secondary); }
     .instance { margin-top: 4px; font-size: .76rem; overflow-wrap: anywhere; }
     .message { margin-top: 14px; color: var(--secondary); font-size: .86rem; line-height: 1.45; }
@@ -93,6 +96,11 @@ const HTML = `<!doctype html>
     .dataset-detail h2 { white-space: normal; }
     .close-button { min-height: 32px; padding: 5px 10px; border: 0; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font: inherit; font-size: .76rem; font-weight: 650; cursor: pointer; }
     .close-button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    .close-button:disabled { color: var(--secondary); background: var(--row); cursor: default; }
+    .run-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .run-actions .close-button { min-height: 38px; padding: 8px 14px; }
+    .run-warning { margin-top: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--orange) 25%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--orange) 6%, transparent); color: var(--orange); font-size: .78rem; line-height: 1.45; }
+    #run-jobs .stat:last-child { grid-column: 1 / -1; }
     .scores { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 14px; }
     .score { padding: 10px; border-radius: 12px; background: color-mix(in srgb, currentColor 7%, transparent); color: var(--secondary); text-align: center; }
     .score strong { display: block; font-size: 1.2rem; }
@@ -144,6 +152,16 @@ const HTML = `<!doctype html>
       <span id="badge" class="badge">Waiting</span>
     </header>
     <p id="message" class="message" role="status" aria-live="polite">Waiting for Galaxy…</p>
+    <section id="run-panel" aria-label="Analysis run status" hidden>
+      <p id="run-checked" class="detail"></p>
+      <p id="run-warning" class="run-warning" role="status" aria-live="polite" hidden></p>
+      <dl id="run-jobs" class="statistics" aria-label="Job counts" hidden></dl>
+      <div class="run-actions">
+        <button id="run-refresh" class="close-button" type="button">Refresh status</button>
+        <button id="run-results" class="close-button" type="button">View history results</button>
+      </div>
+      <p id="run-results-note" class="caveat">History results may include inputs and outputs from other runs.</p>
+    </section>
     <ul id="histories" aria-label="Galaxy histories" hidden></ul>
     <button id="show-more" class="close-button more-button" type="button" hidden>Show more</button>
     <section id="dataset-detail" class="dataset-detail" aria-labelledby="detail-title" hidden>
@@ -162,6 +180,13 @@ const HTML = `<!doctype html>
     const title = document.getElementById("title");
     const instance = document.getElementById("instance");
     const message = document.getElementById("message");
+    const runPanel = document.getElementById("run-panel");
+    const runChecked = document.getElementById("run-checked");
+    const runWarning = document.getElementById("run-warning");
+    const runJobs = document.getElementById("run-jobs");
+    const runRefresh = document.getElementById("run-refresh");
+    const runResults = document.getElementById("run-results");
+    const runResultsNote = document.getElementById("run-results-note");
     const histories = document.getElementById("histories");
     const breadcrumbs = document.getElementById("breadcrumbs");
     const historyBack = document.getElementById("history-back");
@@ -191,6 +216,11 @@ const HTML = `<!doctype html>
     let historyVisibleCount = 20;
     let firstOffset = 0;
     let canShowMore = false;
+    let currentRun;
+    let runRefreshing = false;
+    let runUnconfirmed = false;
+    const runStateLabels = { accepted: "Submitted", queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled", empty: "No analysis ran", unknown: "Status unknown" };
+    const runMessages = { accepted: "Galaxy accepted this analysis. Refresh to check its progress.", queued: "Waiting for Galaxy to start the jobs.", running: "Galaxy is processing this analysis.", completed: "Processing has finished. Review the results to assess their quality.", failed: "This analysis failed. Review the available details and any partial results.", cancelled: "This analysis was cancelled. Existing results may still be available.", empty: "No analysis ran: no jobs were created, or every job was skipped.", unknown: "The current state could not be confirmed." };
 
     function post(message) {
       window.parent.postMessage(message, "*");
@@ -229,13 +259,87 @@ const HTML = `<!doctype html>
       showMore.hidden = !datasetDetail.hidden || !canShowMore;
     }
 
+    function renderRun() {
+      closeDatasetDetail(false);
+      runPanel.hidden = false;
+      runPanel.setAttribute("aria-busy", String(runRefreshing));
+      breadcrumbs.hidden = true;
+      histories.replaceChildren();
+      canShowMore = false;
+      updateListVisibility();
+      const state = Object.hasOwn(runStateLabels, currentRun.state) ? currentRun.state : "unknown";
+      title.textContent = string(currentRun.name) || (currentRun.kind === "workflow" ? "Galaxy workflow" : "Galaxy tool run");
+      instance.textContent = currentRun.kind === "workflow" ? "Workflow run" : "Tool run";
+      instance.hidden = false;
+      badge.dataset.state = runUnconfirmed || state === "unknown" ? "unknown" : state === "completed" ? "connected" : state === "failed" ? "error" : state === "running" ? "running" : "neutral";
+      badge.textContent = runUnconfirmed ? "Unconfirmed" : runStateLabels[state];
+      message.textContent = string(currentRun.message) || runMessages[state];
+      const checked = new Date(string(currentRun.checked_at));
+      runChecked.textContent = Number.isNaN(checked.getTime()) ? "No confirmed status check yet." : "Last checked " + checked.toLocaleString();
+      runWarning.hidden = !runUnconfirmed;
+      runWarning.textContent = "The current status is unconfirmed. " + (state === "unknown" ? "Refresh status to try again." : "Last known status: " + runStateLabels[state] + ". Refresh status to try again.");
+      runJobs.replaceChildren();
+      for (const [key, label] of [["completed", "Completed jobs"], ["failed", "Failed jobs"], ["running", "Running jobs"], ["queued", "Queued jobs"], ["other", "Other jobs"], ["total", "Total jobs"]]) {
+        const count = currentRun.jobs?.[key];
+        if (!Number.isSafeInteger(count) || count < 0 || (key === "other" && count === 0)) continue;
+        const stat = document.createElement("div");
+        const term = document.createElement("dt");
+        const value = document.createElement("dd");
+        stat.className = "stat";
+        term.textContent = label;
+        value.textContent = String(count);
+        stat.append(term, value);
+        runJobs.append(stat);
+      }
+      runJobs.hidden = runJobs.childElementCount === 0;
+      runRefresh.disabled = runRefreshing || !string(currentRun.id) || !["tool", "workflow"].includes(currentRun.kind);
+      runRefresh.textContent = runRefreshing ? "Checking…" : runUnconfirmed ? "Retry status check" : "Refresh status";
+      runResults.disabled = !string(currentRun.history_id);
+      runResultsNote.textContent = runResults.disabled ? "History results are not available for this run yet." : "History results may include inputs and outputs from other runs.";
+    }
+
+    async function refreshRun() {
+      if (runRefreshing || runRefresh.disabled || !currentRun) return;
+      localNavigation = true;
+      const requestId = ++viewRequestId;
+      const previous = currentRun;
+      runRefreshing = true;
+      renderRun();
+      sendSize();
+      try {
+        const result = await request("tools/call", { name: "get_run_status", arguments: { kind: previous.kind, runId: previous.id } });
+        if (requestId !== viewRequestId) return;
+        const data = result?.structuredContent;
+        if (result?.isError || data?.success !== true || data.run?.id !== previous.id || data.run?.kind !== previous.kind) throw new Error("Run status unavailable");
+        currentRun = data.run;
+        runUnconfirmed = false;
+      } catch {
+        if (requestId !== viewRequestId) return;
+        runUnconfirmed = true;
+      } finally {
+        if (requestId === viewRequestId) {
+          runRefreshing = false;
+          renderRun();
+          sendSize();
+        }
+      }
+    }
+
+    runRefresh.addEventListener("click", refreshRun);
+    runResults.addEventListener("click", () => {
+      if (!currentRun || runResults.disabled) return;
+      return openHistory({ id: currentRun.history_id, name: "History results" });
+    });
+
     function renderHistories(data) {
       closeDatasetDetail(false);
+      runPanel.hidden = true;
       const status = Object.hasOwn(labels, data.status) ? data.status : "error";
       const items = Array.isArray(data.histories) ? data.histories.filter(value => value && typeof value === "object") : [];
       const rows = items.slice(0, visibleCount);
 
       breadcrumbs.hidden = true;
+      historyBack.textContent = "‹ Histories";
       title.textContent = "Galaxy histories";
       histories.setAttribute("aria-label", "Galaxy histories");
       badge.dataset.state = status;
@@ -306,14 +410,16 @@ const HTML = `<!doctype html>
 
     function renderContents(data) {
       closeDatasetDetail(false);
+      runPanel.hidden = true;
       const success = data.success === true && Array.isArray(data.data);
       const items = success ? data.data.filter(value => value && typeof value === "object") : [];
       const rows = items.slice(0, visibleCount);
       const status = success ? "connected" : data.errorKind === "connection" ? "not_configured" : "error";
 
-      breadcrumbs.hidden = !historyList;
+      breadcrumbs.hidden = !historyList && !currentRun;
+      historyBack.textContent = currentRun ? "‹ Run status" : "‹ Histories";
       historyName.textContent = string(currentHistory?.name) || "History contents";
-      title.textContent = "History contents";
+      title.textContent = currentRun ? "History results" : "History contents";
       histories.setAttribute("aria-label", "Galaxy history contents");
       badge.dataset.state = status;
       badge.textContent = success ? "Results" : labels[status];
@@ -386,6 +492,7 @@ const HTML = `<!doctype html>
     async function openHistory(value) {
       localNavigation = true;
       const requestId = ++viewRequestId;
+      runRefreshing = false;
       currentHistory = value;
       currentContents = undefined;
       visibleCount = 20;
@@ -402,7 +509,7 @@ const HTML = `<!doctype html>
         renderContents(currentContents);
       } catch {
         if (requestId !== viewRequestId) return;
-        renderContents({ success: false, message: "This history could not be loaded. Return to Histories and try again." });
+        renderContents({ success: false, message: "This history could not be loaded. " + (currentRun ? "Return to Run status" : "Return to Histories") + " and try again." });
       } finally {
         if (requestId === viewRequestId) {
           histories.removeAttribute("aria-busy");
@@ -461,7 +568,10 @@ const HTML = `<!doctype html>
       currentContents = undefined;
       visibleCount = historyVisibleCount;
       histories.removeAttribute("aria-busy");
-      renderHistories(historyList);
+      if (currentRun) {
+        renderRun();
+        runResults.focus();
+      } else renderHistories(historyList);
       sendSize();
     });
     showMore.addEventListener("click", loadMore);
@@ -699,12 +809,22 @@ const HTML = `<!doctype html>
       if (!data || typeof data !== "object") return;
       visibleCount = 20;
       viewRequestId += 1;
-      if (Object.hasOwn(data, "success")) {
+      if (data.run && typeof data.run === "object") {
+        currentRun = data.run;
+        runRefreshing = false;
+        runUnconfirmed = data.success !== true;
+        currentHistory = undefined;
+        currentContents = undefined;
+        historyList = undefined;
+        renderRun();
+      } else if (Object.hasOwn(data, "success")) {
+        currentRun = undefined;
         currentContents = data;
         currentHistory = { id: string(data.history_id) };
         firstOffset = Number.isSafeInteger(data.pagination?.offset) ? data.pagination.offset : 0;
         renderContents(data);
       } else {
+        currentRun = undefined;
         historyList = data;
         historyVisibleCount = 20;
         currentContents = undefined;
@@ -755,7 +875,7 @@ const HTML = `<!doctype html>
     const initial = window.openai?.toolOutput;
     if (initial) render(initial.structuredContent ?? initial);
     request("ui/initialize", {
-      appInfo: { name: "Galaxy results", version: "1.3.0" },
+      appInfo: { name: "Galaxy results", version: "1.4.0" },
       appCapabilities: {},
       protocolVersion: "2026-01-26",
     }, 15000).then(() => {
@@ -763,6 +883,11 @@ const HTML = `<!doctype html>
       post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
       sendSize();
     }).catch(() => {
+      if (currentRun && !currentHistory) {
+        runUnconfirmed = true;
+        renderRun();
+        return;
+      }
       badge.dataset.state = "error";
       badge.textContent = "Unavailable";
       message.textContent = "The host did not initialize this Galaxy view. Existing results remain available; reopen the app to reconnect.";
@@ -786,7 +911,7 @@ export function registerHistorySummaryResource(server: McpServer): void {
     server.registerResource(
       `galaxy-history-v${index + 1}`,
       resourceUri,
-      { title: "Galaxy histories and contents", mimeType: MIME_TYPE, _meta: metadata },
+      { title: "Galaxy runs, histories and results", mimeType: MIME_TYPE, _meta: metadata },
       (uri) => ({
         contents: [{ uri: uri.href, mimeType: MIME_TYPE, text: HTML, _meta: metadata }],
       }),

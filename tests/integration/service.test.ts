@@ -183,12 +183,15 @@ describe("HTTP MCP service", () => {
     expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
       "get_histories",
       ...productOperations.map(({ name }) => name),
+      "get_run_status",
       "get_dataset_text",
       "get_dataset_html",
     ]);
     const unconfigured = await client.callTool({ name: "search_tools_by_name", arguments: { query: "fastqc" } });
     expect(unconfigured.structuredContent).toMatchObject({ success: false, errorKind: "connection" });
     expect(unconfigured.isError).toBe(true);
+    const unconfiguredRun = await client.callTool({ name: "get_run_status", arguments: { kind: "tool", runId: "r1" } });
+    expect(unconfiguredRun).toMatchObject({ isError: true, structuredContent: { success: false, run: { kind: "tool", id: "r1", state: "unknown" } } });
     const unconfiguredHistory = await client.callTool({ name: "get_history_details", arguments: { historyId: "h1" } });
     expect(unconfiguredHistory).toMatchObject({ isError: true, content: [{ type: "text" }] });
     expect(unconfiguredHistory.structuredContent).toBeUndefined();
@@ -255,7 +258,7 @@ describe("HTTP MCP service", () => {
     expect(html).not.toMatch(/https?:\/\//);
     expect(() => new Function(html.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "")).not.toThrow();
 
-    for (let version = 1; version <= 8; version += 1) {
+    for (let version = 1; version <= 9; version += 1) {
       const legacyUri = `ui://galaxy/history-summary-v${version}.html`;
       const legacy = await client.readResource({ uri: legacyUri });
       expect(legacy.contents[0]).toMatchObject({ uri: legacyUri, mimeType: "text/html;profile=mcp-app" });

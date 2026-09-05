@@ -102,7 +102,7 @@ const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("history result browser", () => {
   it("serves every published URI and reveals every returned item without inventing a total", async () => {
-    expect(resources.size).toBe(9);
+    expect(resources.size).toBe(10);
     expect([...resources.values()].every(value => value === html)).toBe(true);
     const ui = mount({ success: true, data: items(25) });
     expect(ui.node("histories").children).toHaveLength(20);
@@ -232,5 +232,125 @@ describe("history result browser", () => {
     expect(animation.removed).toBe(true);
     expect(ui.head.children[0]!.attrs.get("content")).toContain("connect-src 'none'");
     expect(html).toContain('frame.setAttribute("sandbox", "")');
+  });
+});
+
+const running = {
+  kind: "tool", id: "private-run", name: "Read quality check", state: "running",
+  checked_at: "2026-09-05T12:00:00.000Z", history_id: "private-history",
+  jobs: { completed: 1, failed: 0, running: 1, queued: 2, other: 0, total: 4 },
+};
+
+describe("run status card", () => {
+  it("refreshes a snapshot once without submitting jobs, then opens the existing result browser", async () => {
+    const completed = { ...running, state: "completed", checked_at: "2026-09-05T12:05:00.000Z", jobs: { ...running.jobs, completed: 4, running: 0, queued: 0 } };
+    const ui = mount({ success: true, run: running });
+    expect(ui.node("title").textContent).toBe("Read quality check");
+    expect(ui.node("badge").textContent).toBe("Running");
+    expect(ui.node("run-jobs").textContent).toContain("Completed jobs1");
+    expect(ui.node("run-jobs").textContent).not.toContain("private-");
+    const firstChecked = ui.node("run-checked").textContent;
+    const refresh = ui.node("run-refresh").click();
+    await ui.node("run-refresh").click();
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(1);
+    expect(ui.node("run-refresh").disabled).toBe(true);
+    expect(ui.node("run-checked").textContent).toBe(firstChecked);
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { success: true, run: completed } });
+    await refresh;
+    expect(ui.node("badge").textContent).toBe("Completed");
+    expect(ui.node("run-checked").textContent).not.toBe(firstChecked);
+    expect(ui.node("run-refresh").disabled).toBe(false);
+
+    const results = ui.node("run-results").click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { success: true, data: items(1) } });
+    await results;
+    expect(ui.node("title").textContent).toBe("History results");
+    expect(ui.node("run-panel").hidden).toBe(true);
+    expect(ui.node("history-back").textContent).toBe("‹ Run status");
+    const report = ui.node("histories").children[0]!.children[0]!.click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { name: "Report", text: "Quality result" } });
+    await report;
+    expect(ui.node("detail-body").textContent).toContain("Quality result");
+    await ui.node("detail-close").click();
+    await ui.node("history-back").click();
+    expect(ui.node("run-panel").hidden).toBe(false);
+    expect(ui.node("run-results").focused).toBe(true);
+    expect(ui.node("badge").textContent).toBe("Completed");
+    expect(ui.node("run-results-note").textContent).toContain("other runs");
+    expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params)).toEqual([
+      { name: "get_run_status", arguments: { kind: "tool", runId: "private-run" } },
+      { name: "get_history_contents", arguments: { historyId: "private-history", limit: 20, offset: 0 } },
+      { name: "get_dataset_text", arguments: { datasetId: "private-dataset-0" } },
+    ]);
+  });
+
+  it("keeps the last known snapshot and checked time after an error or timeout, with a working retry", async () => {
+    const ui = mount({ success: true, run: running });
+    const checked = ui.node("run-checked").textContent;
+    const failed = ui.node("run-refresh").click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { isError: true, structuredContent: { success: false, run: { ...running, state: "unknown", checked_at: "2026-09-05T12:10:00.000Z" } } });
+    await failed;
+    expect(ui.node("badge").textContent).toBe("Unconfirmed");
+    expect(ui.node("run-warning").textContent).toContain("Last known status: Running");
+    expect(ui.node("run-checked").textContent).toBe(checked);
+    expect(ui.node("run-jobs").textContent).toContain("Running jobs1");
+    expect(ui.node("run-refresh").textContent).toBe("Retry status check");
+    const timeout = ui.node("run-refresh").click();
+    ui.expire(45000);
+    await timeout;
+    expect(ui.node("run-checked").textContent).toBe(checked);
+    expect(ui.node("run-refresh").disabled).toBe(false);
+    const retry = ui.node("run-refresh").click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { success: true, run: { ...running, state: "failed", message: "A job could not read its input." } } });
+    await retry;
+    expect(ui.node("badge").textContent).toBe("Failed");
+    expect(ui.node("message").textContent).toBe("A job could not read its input.");
+    expect(ui.node("run-warning").hidden).toBe(true);
+    expect(ui.node("run-results").disabled).toBe(false);
+    expect(ui.pending()).toBe(0);
+  });
+
+  it("does not replace the result browser with late status or history responses", async () => {
+    const ui = mount({ success: true, run: running });
+    const refresh = ui.node("run-refresh").click();
+    const statusCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    const results = ui.node("run-results").click();
+    const historyCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    ui.reply(statusCall, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    await refresh;
+    expect(ui.node("title").textContent).toBe("History results");
+    await ui.node("history-back").click();
+    ui.reply(historyCall, { structuredContent: { success: true, data: items(1) } });
+    await results;
+    expect(ui.node("badge").textContent).toBe("Running");
+    expect(ui.node("run-refresh").disabled).toBe(false);
+    ui.notify({ success: true, run: { ...running, state: "completed" } });
+    expect(ui.node("badge").textContent).toBe("Running");
+  });
+
+  it("uses human defaults and disables unavailable actions without inventing checks or results", async () => {
+    const ui = mount({ success: false, run: { kind: "workflow", state: "unknown" } });
+    expect(ui.node("title").textContent).toBe("Galaxy workflow");
+    expect(ui.node("run-refresh").disabled).toBe(true);
+    expect(ui.node("run-results").disabled).toBe(true);
+    expect(ui.node("run-checked").textContent).toBe("No confirmed status check yet.");
+    expect(ui.node("run-jobs").hidden).toBe(true);
+    await ui.node("run-refresh").click();
+    await ui.node("run-results").click();
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+    expect(script).not.toMatch(/name: "(?:run_tool|invoke_workflow|cancel_workflow_invocation)"/);
+    const named = mount({ success: true, run: { ...running, name: "<img src=x onerror=alert(1)>" } });
+    expect(named.node("title").textContent).toBe("<img src=x onerror=alert(1)>");
+    expect(named.node("title").children).toHaveLength(0);
+    const offline = mount({ success: true, run: running }, { initialize: false });
+    const checked = offline.node("run-checked").textContent;
+    offline.expire(15000);
+    await flush();
+    expect(offline.node("badge").textContent).toBe("Unconfirmed");
+    expect(offline.node("run-checked").textContent).toBe(checked);
+    expect(offline.node("run-warning").textContent).toContain("Last known status: Running");
+    const skipped = mount({ success: true, run: { ...running, state: "empty", jobs: { other: 1, total: 1 } } });
+    expect(skipped.node("badge").textContent).toBe("No analysis ran");
+    expect(skipped.node("run-jobs").textContent).toContain("Total jobs1");
   });
 });

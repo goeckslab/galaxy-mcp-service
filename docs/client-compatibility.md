@@ -4,7 +4,7 @@ This document records real client and Galaxy validation separately from automate
 
 ## Product surface
 
-Version 0.3 exposes 28 public actions across connection, histories, datasets, collections, installed tools, jobs, stored workflows, workflow invocations, and curated IWC workflows, plus one private app-only HTML report loader. `run_tool` now returns on acceptance; the new `get_tool_request_status` resumes observation without resubmission. The earlier four compatibility probes were removed from the public tool catalog.
+Version 0.4 exposes 29 public actions across connection, histories, datasets, collections, installed tools, jobs, stored workflows, workflow invocations, and curated IWC workflows, plus one private app-only HTML report loader. `run_tool` returns on acceptance; `get_tool_request_status` resumes observation without resubmission, and `get_run_status` presents an existing tool request or workflow invocation in a read-only status card. The earlier four compatibility probes were removed from the public tool catalog.
 
 Local-path upload/download, direct history deletion, and unrestricted user-tool management are not exposed to remote clients.
 
@@ -30,6 +30,14 @@ Local-path upload/download, direct history deletion, and unrestricted user-tool 
 The local automated suite passes 39 tests, including resumable submission, missing-handle errors, pagination, OAuth-provider compatibility, request cancellation, redirect rejection, health Host checks, and UI bridge behavior. The production widget was also exercised in a local browser with clearly labelled synthetic fixtures at 880 and 390 pixels: navigation, pagination, text/HTML scrolling, safe section links, theme changes, and height updates passed. These are not new live Galaxy or ChatGPT results. CI is configured but has not run on a remote repository.
 
 A Node.js 22 container smoke check passed health, service version, all 29 tools, and the v9 resource with the current build mounted read-only in an existing image. A fresh Docker image build stalled at base-image metadata resolution and was cancelled; fresh image packaging remains unverified.
+
+## Version 0.4 run-status validation — 2026-09-05
+
+Lint, TypeScript checks, frozen dependency installation, and all 84 automated tests passed. These include read-only MCP integration and UI refresh/navigation checks; the added tests do not execute real analyses.
+
+The status reader was checked against an existing, already-cancelled QA workflow on the configured Galaxy instance. It returned the observed cancelled state, workflow name, and containing-history handle using two GET requests; it did not create, submit, or cancel any Galaxy resource. An older completed FastQC job did not expose a tool-request handle and was not presented as a successful status-card test.
+
+Local browser validation used the production v10 HTML. Recorded Galaxy screenshots retain their actual cancelled state and are labelled as snapshot replay, not live polling. Separately labelled synthetic scenarios cover running-to-completed refresh, failed-query snapshot retention, retry, and history/report/back navigation at wide and 390-pixel widths. The narrow card had no horizontal overflow. Browser message-channel warnings were observed without breaking these interactions; this is not a claim of a warning-free browser session or a completed ChatGPT-host validation.
 
 ## Real FastQC path
 

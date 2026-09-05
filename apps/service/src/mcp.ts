@@ -16,6 +16,7 @@ import { z } from "zod";
 
 import { HISTORY_SUMMARY_URI, registerHistorySummaryResource } from "./history-summary-ui.js";
 import { createRequestGalaxyContext } from "./galaxy-connection.js";
+import { readRunStatus } from "./run-status.js";
 
 export interface GalaxyConnection {
   baseUrl: string;
@@ -84,6 +85,31 @@ const operationOutput = z.object({
   message: z.string().optional(),
   errorKind: z.string().optional(),
 }).passthrough();
+const runStatusInput = z.object({
+  kind: z.enum(["tool", "workflow"]).describe("The kind of previously submitted analysis"),
+  runId: z.string().trim().min(1).max(512).describe("The existing tool-request or workflow-invocation handle; never a history or job id"),
+}).strict();
+const runStatusOutput = z.object({
+  success: z.boolean(),
+  message: z.string().optional(),
+  run: z.object({
+    kind: z.enum(["tool", "workflow"]),
+    id: z.string(),
+    name: z.string(),
+    state: z.enum(["accepted", "queued", "running", "completed", "failed", "cancelled", "empty", "unknown"]),
+    checked_at: z.string(),
+    history_id: z.string().optional(),
+    message: z.string().optional(),
+    jobs: z.object({
+      completed: z.number().int().min(0),
+      failed: z.number().int().min(0),
+      running: z.number().int().min(0),
+      queued: z.number().int().min(0),
+      other: z.number().int().min(0),
+      total: z.number().int().min(0),
+    }).optional(),
+  }),
+});
 const datasetTextInput = z
   .object({
     datasetId: z.string().trim().min(1).describe("Encoded dataset id for a text analysis result"),
@@ -387,7 +413,7 @@ export function createGalaxyMcpHandler(
   return createMcpHandler(
     ({ authInfo }) => {
       const connection = authInfo === undefined ? galaxy : authenticatedGalaxy(authInfo);
-      const server = new McpServer({ name: "galaxy-mcp-service", version: "0.3.0" });
+      const server = new McpServer({ name: "galaxy-mcp-service", version: "0.4.0" });
 
       registerHistorySummaryResource(server);
       server.registerTool(
@@ -413,6 +439,33 @@ export function createGalaxyMcpHandler(
       );
 
       for (const operation of productOperations) registerGalaxyOperation(server, operation, connection);
+      server.registerTool(
+        "get_run_status",
+        {
+          title: "Galaxy run status",
+          description: "Check an existing tool request or workflow invocation once and show a status card. Use after submission or when the user asks for visible progress. Refreshing never submits, cancels, or retries an analysis. Completed means execution succeeded, not that the scientific result has been validated.",
+          inputSchema: runStatusInput,
+          outputSchema: runStatusOutput,
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+          _meta: {
+            ui: { resourceUri: HISTORY_SUMMARY_URI },
+            "openai/toolInvocation/invoking": "Checking analysis progress…",
+            "openai/toolInvocation/invoked": "Analysis status checked.",
+          },
+        },
+        async ({ kind, runId }, ctx) => {
+          if (connection === undefined) return structured({
+            success: false,
+            run: {
+              kind, id: runId, name: kind === "tool" ? "Galaxy tool run" : "Galaxy workflow",
+              state: "unknown", checked_at: new Date().toISOString(),
+              message: "Connect a Galaxy account to check this analysis. No new analysis was submitted.",
+            },
+          });
+          const signal = AbortSignal.any([ctx.mcpReq.signal, AbortSignal.timeout(30_000)]);
+          return structured(await readRunStatus(kind, runId, context(connection, signal)));
+        },
+      );
       server.registerTool(
         "get_dataset_text",
         {

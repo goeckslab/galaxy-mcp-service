@@ -12,10 +12,13 @@
 - List and inspect workflows, build input templates, invoke workflows, monitor invocations, and cancel an invocation with destructive-action confirmation.
 - Search and recommend curated IWC workflows, inspect them, and import one into Galaxy.
 - Browse recent histories, paginated results, and reports in a dependency-free MCP Apps card. Back navigation preserves the expanded list; text and HTML reports support horizontal scrolling.
+- Show an existing tool request or workflow invocation with `get_run_status`: human-readable state, observed job counts, last-check time, available failure details, and a link into the existing history browser. Refresh is read-only and never reruns the analysis.
 
 The HTML viewer disables scripts, forms, external links, and external network access while preserving safe report-internal links and SVG references. Raw report HTML is delivered only to the app component, not to the model. Server-local upload and download paths, collection creation, unrestricted account-management operations, and direct history deletion are intentionally not exposed to remote clients.
 
 In version 0.3, `run_tool` returns an accepted request handle, not a completed analysis. Keep that handle and call `get_tool_request_status` until terminal; a transient status error includes recovery information and does not authorize resubmission. An `empty` run created no jobs and needs input inspection, not indefinite polling. A submission timeout can have an unknown outcome and must not be retried blindly. History pages default to 20 items (maximum 100); follow `pagination.next_offset` while `has_more` is true. The service never labels a history page's length as its total.
+
+Use `get_run_status` when a visible status card is useful; execution and background status tools remain data-only so repeated checks do not create repeated cards. This follows the [OpenAI guidance on separating data processing from rendering](https://developers.openai.com/plugins/build/chatgpt-ui#separate-data-processing-from-ui-rendering). The card refreshes only on request, preserves its previous snapshot when a check fails, and never estimates a percentage. Workflow scheduling alone is not completion: its own job summary must confirm successful execution. The history button opens the containing history, which may include other runs. An old job ID without a tool-request or invocation handle is not supported by this card; inspect it with `get_job_details` instead.
 
 ## Run locally
 

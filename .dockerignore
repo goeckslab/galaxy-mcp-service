@@ -2,6 +2,7 @@
 node_modules
 **/dist
 data
+artifacts
 .env
 to-do.md
 AGENTS.md

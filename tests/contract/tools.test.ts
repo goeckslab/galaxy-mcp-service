@@ -35,6 +35,7 @@ describe("Galaxy tool contract", () => {
     expect(tools.map(({ name }) => name)).toEqual([
       "get_histories",
       ...productOperations.map(({ name }) => name),
+      "get_run_status",
       "get_dataset_text",
       "get_dataset_html",
     ]);
@@ -63,6 +64,15 @@ describe("Galaxy tool contract", () => {
         offset: { type: "integer", minimum: 0, default: 0 },
       },
     });
+    expect(tools.find(({ name }) => name === "get_run_status")).toMatchObject({
+      inputSchema: { type: "object", required: ["kind", "runId"], additionalProperties: false },
+      outputSchema: { type: "object", required: ["success", "run"] },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+      _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
+    });
+    for (const name of ["run_tool", "invoke_workflow", "get_tool_request_status", "get_invocations"]) {
+      expect(tools.find((tool) => tool.name === name)?._meta ?? {}).not.toHaveProperty("ui.resourceUri");
+    }
     expect(tools.find(({ name }) => name === "get_history_details")?.outputSchema).toMatchObject({
       type: "object",
       required: ["id", "name", "state", "count"],
