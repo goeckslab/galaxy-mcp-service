@@ -1,0 +1,19 @@
+{
+  "name": "@galaxy-mcp-service/service",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file-if-exists=../../.env watch src/index.ts"
+  },
+  "dependencies": {
+    "@galaxy-mcp-service/protocol": "workspace:*",
+    "@galaxyproject/galaxy-ops": "0.1.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/express": "2.0.0",
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "express": "^5.0.0",
+    "zod": "^4.0.0"
+  }
+}
