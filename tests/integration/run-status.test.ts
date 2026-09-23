@@ -38,6 +38,12 @@ it("reads tool and workflow cards, refreshes and opens history without submittin
     expect((await read("tool", "r1")).structuredContent).toMatchObject({
       success: true, run: { name: "Example analysis", state: "running", history_id: "h1", jobs: { running: 1, total: 1 } },
     });
+    expect((await read("tool", "r1")).structuredContent).not.toHaveProperty("presentation");
+    const card = await client.callTool({ name: "show_run_status", arguments: { kind: "tool", runId: "r1" } });
+    expect(card.structuredContent).toMatchObject({
+      run: { id: "r1", state: "running" },
+      presentation: { view_id: expect.any(String), display_status: "unconfirmed" },
+    });
     expect((await read("workflow", "i1")).structuredContent).toMatchObject({
       success: true, run: { name: "Example workflow", state: "running", history_id: "h1" },
     });

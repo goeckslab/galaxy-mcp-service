@@ -38,6 +38,12 @@ function cleanIdentifier(value: unknown): string | undefined {
   return typeof value === "string" && safeIdentifier.test(value) ? value : undefined;
 }
 
+function cleanMethod(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= 128 && /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(value)
+    ? value
+    : undefined;
+}
+
 function cleanClientInfo(value: unknown): { name?: string; version?: string } | undefined {
   if (!isRecord(value)) return undefined;
   const name = cleanIdentifier(value.name);
@@ -95,10 +101,10 @@ export function extractRequestMetadata(
   const params = requestParams(body);
   const meta = requestMeta(body);
   const clientCapabilities = meta?.[CLIENT_CAPABILITIES_META_KEY];
-  const bodyMethod = isRecord(body) ? cleanIdentifier(body.method) : undefined;
+  const bodyMethod = isRecord(body) ? cleanMethod(body.method) : undefined;
   const bodyName = cleanIdentifier(params?.name) ?? cleanIdentifier(params?.taskId);
   const protocolVersion = cleanIdentifier(headers.get("mcp-protocol-version"));
-  const methodHeader = cleanIdentifier(headers.get("mcp-method"));
+  const methodHeader = cleanMethod(headers.get("mcp-method"));
   const nameHeader = cleanIdentifier(headers.get("mcp-name"));
   const clientInfo = meta === undefined ? undefined : cleanClientInfo(meta[CLIENT_INFO_META_KEY]);
 

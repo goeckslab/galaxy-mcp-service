@@ -17,6 +17,7 @@ import {
 
 import type { UniversalAuth } from "./auth.js";
 import { createGalaxyMcpHandler, type GalaxyConnection } from "./mcp.js";
+import { publicPage, publicPageCsp, publicPagePaths } from "./public-pages.js";
 
 export interface AppOptions {
   auth?: UniversalAuth;
@@ -60,6 +61,7 @@ export function createApp(options: AppOptions = {}) {
   }
   const log = options.log ?? console.log;
   const allowedHosts = allowedHostnames(options.publicBaseUrl);
+  const publicOrigin = options.publicBaseUrl?.trim() ? new URL(options.publicBaseUrl) : undefined;
   const mcpHandler = createGalaxyMcpHandler(
     (error) =>
       metadataLog(
@@ -72,6 +74,7 @@ export function createApp(options: AppOptions = {}) {
         log,
       ),
     options.galaxy,
+    publicOrigin?.protocol === "https:" ? publicOrigin.origin : undefined,
   );
   const nodeHandler = toNodeHandler({
     async fetch(request, handlerOptions) {
@@ -113,10 +116,21 @@ export function createApp(options: AppOptions = {}) {
     next();
   });
   app.use(createMcpExpressApp({
-    host: options.host ?? "0.0.0.0",
+    host: options.host ?? "127.0.0.1",
     allowedHosts,
     jsonLimit: "256kb",
   }).disable("x-powered-by"));
+
+  app.get(publicPagePaths, (req, res) => {
+    const page = publicPage(req.path);
+    if (page === undefined) return res.sendStatus(404);
+    res.set({
+      "Content-Security-Policy": publicPageCsp,
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "public, max-age=300",
+    }).type("html").send(page);
+  });
 
   if (options.auth !== undefined) {
     app.use(

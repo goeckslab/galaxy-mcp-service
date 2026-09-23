@@ -16,13 +16,13 @@ const metadata = {
   token_endpoint_auth_methods_supported: ["none"],
 };
 
-function load(overrides: Record<string, unknown> = {}, audience = resource) {
+function load(overrides: Record<string, unknown> = {}, audience = resource, tokenOverrides: Record<string, unknown> = {}) {
   return loadUniversalAuth({
     metadataUrl: `${issuer}/.well-known/oauth-authorization-server`,
     resourceServerUrl: resource,
     introspectionClientId: "fixture-client",
     introspectionClientSecret: "fixture-secret",
-    instancesJson: '{"main":"https://galaxy.example.test"}',
+    instancesJson: '{"main":"https://galaxy.example.test","eu":"https://eu.example.test"}',
     fetchImpl: async (input, init) => {
       const request = new Request(input, init);
       expect(request.redirect).toBe("error");
@@ -39,12 +39,36 @@ function load(overrides: Record<string, unknown> = {}, audience = resource) {
         scope: "galaxy:full",
         galaxy_instance: "main",
         galaxy_api_key: "fixture-api-key",
+        ...tokenOverrides,
       });
     },
   });
 }
 
 describe("OAuth provider compatibility", () => {
+  it("accepts a complete bundle without exposing a default key, and rejects ambiguous or invalid bundles", async () => {
+    const connections = [
+      { instance: "main", api_key: "main-key", url: "https://galaxy.example.test" },
+      { instance: "eu", api_key: "eu-key", url: "https://eu.example.test" },
+    ];
+    const bundle = { galaxy_instance: undefined, galaxy_api_key: undefined, galaxy_connections: connections };
+    const auth = await load({}, resource, bundle);
+    const verified = await auth.verifier.verifyAccessToken("bundle-token");
+    expect(verified.extra?.galaxy).toBeUndefined();
+    expect(verified.extra?.galaxies).toMatchObject(connections.map(value => ({ instance: value.instance, baseUrl: value.url, apiKey: value.api_key })));
+    for (const overrides of [
+      { galaxy_connections: [] }, { galaxy_connections: [...connections, connections[0]] },
+      { galaxy_instance: "main" }, { galaxy_api_key: "main-key" }, { galaxy_url: "https://galaxy.example.test" },
+      { galaxy_connections: [{ ...connections[0], instance: "unknown" }] },
+      { galaxy_connections: [{ ...connections[1], url: "https://attacker.example.test" }] },
+      { galaxy_connections: [{ ...connections[1], api_key: "" }] },
+      { galaxy_connections: [{ instance: "eu", api_key: "eu-key" }] },
+      { galaxy_connections: undefined },
+    ]) {
+      const invalid = await load({}, resource, { ...bundle, ...overrides });
+      await expect(invalid.verifier.verifyAccessToken("bundle-token")).rejects.toThrow();
+    }
+  });
   it.each([
     ["CIMD public client", { client_id_metadata_document_supported: true }],
     ["DCR confidential client", {
@@ -83,5 +107,14 @@ describe("OAuth provider compatibility", () => {
   it("still rejects introspected tokens issued for another resource", async () => {
     const auth = await load({}, "https://other.example.test/mcp");
     await expect(auth.verifier.verifyAccessToken("fixture-token")).rejects.toThrow("not valid for this service");
+  });
+
+  it("rejects broker/resource instance mapping disagreement before forwarding a credential", async () => {
+    const matching = await load({}, resource, { galaxy_url: "https://galaxy.example.test" });
+    expect(await matching.verifier.verifyAccessToken("fixture-token")).toMatchObject({
+      extra: { galaxy: { baseUrl: "https://galaxy.example.test" } },
+    });
+    const remapped = await load({}, resource, { galaxy_url: "https://different.example.test" });
+    await expect(remapped.verifier.verifyAccessToken("fixture-token")).rejects.toThrow("not valid for this service");
   });
 });

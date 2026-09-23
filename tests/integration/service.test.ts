@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { get } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadUniversalAuth } from "../../apps/service/src/auth.js";
@@ -26,12 +27,55 @@ describe("HTTP MCP service", () => {
     expect(await (await fetch(`${baseUrl}/readyz`)).json()).toEqual({ status: "ready" });
   });
 
+  it("serves only fixed public information pages without scripts, forms or user data", async () => {
+    for (const path of ["/", "/support", "/privacy", "/terms"]) {
+      const response = await fetch(`${baseUrl}${path}?secret=not-for-the-page`);
+      const html = await response.text();
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(response.headers.get("content-security-policy")).toMatch(/default-src 'none'; style-src 'sha256-/);
+      expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(html).toContain('<a href="/support">Support and contact</a>');
+      expect(html).not.toMatch(/mailto:|[\w.+-]+@gmail\.com/i);
+      expect(html).not.toMatch(/<script|<form|<iframe|not-for-the-page|\/Users\//i);
+    }
+    expect((await fetch(`${baseUrl}/constructor`)).status).toBe(404);
+    const home = await (await fetch(`${baseUrl}/`)).text();
+    expect(home).toContain('href="https://usegalaxy.org.au"');
+    expect(home).toContain('href="https://usegalaxy.fr"');
+    expect(home).toContain('href="https://usegalaxy.ca"');
+    expect(home).not.toContain("one selected instance per authorization");
+    const support = await (await fetch(`${baseUrl}/support`)).text();
+    expect(support).toContain('id="request-site"');
+    expect(support).toContain('href="https://github.com/goeckslab/galaxy-plugin/issues"');
+    const privateContact = 'href="https://docs.google.com/forms/d/e/1FAIpQLScT1Wdt9Zc4Jp1uXTj4gEHyKL7jF7gTCBApI16ojtzljYZlGA/viewform"';
+    expect(support).toContain(privateContact);
+    expect(support).toContain('id="private-contact"');
+    const privacy = await (await fetch(`${baseUrl}/privacy`)).text();
+    expect(privacy).toContain(privateContact);
+    expect(privacy).toContain("Google Forms");
+    expect(privacy).toContain("not shown to other respondents");
+    expect(support).toContain("Sending a request does not automatically add the site or authorize an account");
+    expect(support).toContain("Do not send API keys");
+    const foreignHostStatus = await new Promise<number | undefined>((resolve, reject) => {
+      get(`${baseUrl}/privacy`, { headers: { host: "attacker.example" } }, (response) => {
+        response.resume();
+        response.on("end", () => resolve(response.statusCode));
+      }).on("error", reject);
+    });
+    expect(foreignHostStatus).toBe(403);
+  });
+
   it("routes Universal OAuth users to their allowlisted Galaxy instance", async () => {
     const resource = "http://127.0.0.1/mcp";
     const issuer = "https://auth.example.test";
     const introspectionUrl = `${issuer}/oauth/introspect`;
     const brokerSecret = "integration-broker-secret";
     const calls: string[] = [];
+    let expired = false;
+    let revoked = false;
+    let brokerUnavailable = false;
     const fetchImpl: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
@@ -57,13 +101,14 @@ describe("HTTP MCP service", () => {
           `Basic ${Buffer.from(`broker-client:${brokerSecret}`).toString("base64")}`,
         );
         const token = new URLSearchParams(await request.text()).get("token");
-        if (token === "inactive") return Response.json({ active: false });
+        if (brokerUnavailable) return Response.json({}, { status: 503 });
+        if (token === "inactive" || (revoked && token === "token-eu")) return Response.json({ active: false });
         const instance = token === "token-eu" ? "eu" : token === "token-unknown" ? "unknown" : "us";
         return Response.json({
           active: true,
           aud: token === "wrong-audience" ? "https://other.example.test/mcp" : resource,
           client_id: "chatgpt",
-          exp: Math.floor(Date.now() / 1000) + (token === "expired" ? -60 : 60),
+          exp: Math.floor(Date.now() / 1000) + (token === "expired" || (expired && token === "token-us") ? -60 : 60),
           galaxy_api_key: `key-${instance}`,
           galaxy_instance: instance,
           iss: issuer,
@@ -75,6 +120,13 @@ describe("HTTP MCP service", () => {
         const instance = url.host.startsWith("us") ? "us" : "eu";
         expect(request.headers.get("x-api-key")).toBe(`key-${instance}`);
         return Response.json([{ id: `h-${instance}`, name: `${instance.toUpperCase()} history`, state: "ok" }]);
+      }
+      if (request.method === "GET" && url.host === "us.example.test") {
+        expect(request.headers.get("x-api-key")).toBe("key-us");
+        if (url.pathname === "/api/tool_requests/r1") return Response.json({
+          state: "submitted", jobs: [{ id: "j1" }], implicit_collections: [],
+        });
+        if (url.pathname === "/api/jobs/j1") return Response.json({ id: "j1", state: "ok" });
       }
       return Response.json({ error: "unexpected request" }, { status: 404 });
     };
@@ -93,7 +145,7 @@ describe("HTTP MCP service", () => {
         publicBaseUrl: "http://127.0.0.1",
       }),
     ).rejects.toThrow("cannot use a shared Galaxy connection");
-    const configured = await startTestService({ auth, publicBaseUrl: "http://127.0.0.1" });
+    let configured = await startTestService({ auth, publicBaseUrl: "http://127.0.0.1" });
     try {
       const unauthenticated = modernRequest("server/discover");
       const challenge = await fetch(`${configured.baseUrl}/mcp`, {
@@ -113,7 +165,7 @@ describe("HTTP MCP service", () => {
         scopes_supported: ["galaxy:full"],
       });
 
-      for (const instance of ["us", "eu"]) {
+      await Promise.all(["us", "eu"].map(async instance => {
         const request = modernRequest("tools/call", {
           name: "get_histories",
           arguments: { limit: 1 },
@@ -132,7 +184,7 @@ describe("HTTP MCP service", () => {
           instance: `${instance}.example.test`,
           histories: [{ id: `h-${instance}` }],
         });
-      }
+      }));
 
       for (const [token, status] of [
         ["inactive", 401],
@@ -154,13 +206,53 @@ describe("HTTP MCP service", () => {
       expect(configured.logs.join("\n")).not.toMatch(
         /key-us|key-eu|integration-broker-secret|token-us|token-eu|token-unknown|wrong-audience|missing-scope/,
       );
-      expect(calls.filter((call) => call.includes("/api/histories"))).toEqual([
-        "GET us.example.test/api/histories",
+      expect(calls.filter((call) => call.includes("/api/histories")).sort()).toEqual([
         "GET eu.example.test/api/histories",
+        "GET us.example.test/api/histories",
       ]);
       expect(calls.filter((call) => call.endsWith("/oauth/introspect"))).toHaveLength(7);
       expect(calls[0]).toBe(
         "GET auth.example.test/.well-known/oauth-authorization-server",
+      );
+
+      // Expiry/revocation are checked on every request, not cached per MCP connection.
+      const readExistingRun = async (token: string) => {
+        const request = modernRequest("tools/call", {
+          name: "get_tool_request_status", arguments: { toolRequestId: "r1" },
+        });
+        request.headers.set("authorization", `Bearer ${token}`);
+        return fetch(`${configured.baseUrl}/mcp`, {
+          method: "POST", headers: request.headers, body: JSON.stringify(request.body),
+        });
+      };
+      expired = true;
+      revoked = true;
+      const beforeRejected = calls.filter(call => !call.includes("auth.example.test")).length;
+      for (const token of ["token-us", "token-eu"]) {
+        const response = await readExistingRun(token);
+        expect(response.status).toBe(401);
+        expect(response.headers.get("www-authenticate")).toContain("invalid_token");
+      }
+      expect(calls.filter(call => !call.includes("auth.example.test"))).toHaveLength(beforeRejected);
+      const resumed = await readExistingRun("renewed-us");
+      expect(resumed.status).toBe(200);
+      expect(await resumed.json()).toMatchObject({ result: { structuredContent: {
+        success: true, data: { state: "ok", jobs: [{ id: "j1", state: "ok" }] },
+      } } });
+
+      brokerUnavailable = true;
+      const beforeOutage = calls.filter(call => !call.includes("auth.example.test")).length;
+      expect((await readExistingRun("renewed-us")).status).toBe(500);
+      expect(calls.filter(call => !call.includes("auth.example.test"))).toHaveLength(beforeOutage);
+      brokerUnavailable = false;
+      const previousLogs = configured.logs.slice();
+      await configured.stop();
+      configured = await startTestService({ auth, publicBaseUrl: "http://127.0.0.1" });
+      expect((await readExistingRun("renewed-us")).status).toBe(200);
+      expect((await readExistingRun("token-eu")).status).toBe(401);
+      expect(calls.filter(call => !call.includes("auth.example.test")).every(call => call.startsWith("GET "))).toBe(true);
+      expect([...previousLogs, ...configured.logs].join("\n")).not.toMatch(
+        /key-us|key-eu|integration-broker-secret|token-us|token-eu|renewed-us/,
       );
     } finally {
       await configured.stop();
@@ -181,11 +273,16 @@ describe("HTTP MCP service", () => {
     );
     await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
     expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
+      "get_galaxy_connections",
       "get_histories",
-      ...productOperations.map(({ name }) => name),
+      "show_histories",
+      ...productOperations.flatMap(({ name }) => name === "get_history_contents" ? [name, "show_history"] : [name]),
+      "show_dataset",
       "get_run_status",
+      "show_run_status",
       "get_dataset_text",
       "get_dataset_html",
+      "read_dataset_report",
     ]);
     const unconfigured = await client.callTool({ name: "search_tools_by_name", arguments: { query: "fastqc" } });
     expect(unconfigured.structuredContent).toMatchObject({ success: false, errorKind: "connection" });
@@ -202,6 +299,51 @@ describe("HTTP MCP service", () => {
     await client.close();
   });
 
+  it.each(["auto", "legacy"] as const)("delivers shared guidance and text fallback to a tools-only %s client", async mode => {
+    const client = new Client(
+      { name: "tools-only-client", version: "1" },
+      { capabilities: {}, versionNegotiation: { mode } },
+    );
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
+      const instructions = client.getInstructions();
+      expect(instructions).toContain("Galaxy tools work without UI.");
+      expect(instructions).toContain("submit analyses once");
+      expect(instructions).toContain("get_dataset_text");
+      expect(instructions).toContain("read_dataset_report");
+      expect(instructions!.length).toBeLessThanOrEqual(512);
+      const result = await client.callTool({ name: "get_histories", arguments: {} });
+      const content = result.content as Array<{ type: string; text?: string }>;
+      expect(content[0]?.type).toBe("text");
+      expect(JSON.parse(content[0]!.text!)).toEqual(result.structuredContent);
+      expect(result.structuredContent).toMatchObject({ status: "not_configured" });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("keeps the ChatGPT origin host-specific for every UI alias without widening network access", async () => {
+    for (const publicBaseUrl of ["https://MCP.example.test/", "http://localhost", "", "  ", undefined]) {
+      const configured = await startTestService(publicBaseUrl === undefined ? {} : { publicBaseUrl });
+      const client = new Client({ name: "widget-domain-check", version: "0.1.0" }, { capabilities: {} });
+      try {
+        await client.connect(new StreamableHTTPClientTransport(new URL(`${configured.baseUrl}/mcp`)));
+        const listed = await client.listResources();
+        expect(listed.resources).toHaveLength(18);
+        for (const { uri, _meta } of listed.resources) {
+          const result = await client.readResource({ uri });
+          const domain = publicBaseUrl?.startsWith("https:") ? "https://mcp.example.test" : undefined;
+          const expected = {
+            ...(domain && { "openai/widgetDomain": domain }),
+            ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } },
+          };
+          expect(result.contents[0]?._meta).toEqual(expected);
+          expect(_meta).toEqual(expected);
+        }
+      } finally { await client.close(); await configured.stop(); }
+    }
+  });
+
   it("serves a portable history card and an honest unconfigured state", async () => {
     const client = new Client(
       { name: "integration-client", version: "0.1.0" },
@@ -209,11 +351,12 @@ describe("HTTP MCP service", () => {
     );
     await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
 
-    const result = await client.callTool({ name: "get_histories", arguments: {} });
+    const result = await client.callTool({ name: "show_histories", arguments: {} });
     expect(result.structuredContent).toEqual({
       status: "not_configured",
       message: "Connect a Galaxy account to show histories.",
       histories: [],
+      presentation: { view_id: expect.any(String), display_status: "unconfirmed", message: expect.stringContaining("visibility unconfirmed") },
     });
     const resource = await client.readResource({ uri: HISTORY_SUMMARY_URI });
     expect(resource.contents[0]).toMatchObject({
@@ -224,7 +367,6 @@ describe("HTTP MCP service", () => {
           csp: {
             connectDomains: [],
             resourceDomains: [],
-            frameDomains: ["https://web-sandbox.oaiusercontent.com"],
           },
         },
       },
@@ -241,8 +383,8 @@ describe("HTTP MCP service", () => {
     expect(html).toContain('request("tools/call", {');
     expect(html).toContain('name: html ? "get_dataset_html" : "get_dataset_text"');
     expect(html).toContain("new DOMParser()");
-    expect(html).toContain('setAttribute("sandbox", "")');
-    expect(html).toContain('referrerPolicy = "no-referrer"');
+    expect(html).not.toMatch(/createElement\("iframe"\)|\.srcdoc/);
+    expect(html).toContain("Static report preview");
     expect(html).toContain("result?._meta?.html");
     expect(html).toContain('setAttribute("aria-expanded"');
     expect(html).toContain("Basic Statistics");
@@ -251,11 +393,11 @@ describe("HTTP MCP service", () => {
     expect(html).toContain("overflow-x: scroll;");
     expect(html).not.toContain("white-space: pre-wrap;");
     expect(html).toContain('rawText.setAttribute("aria-label", "Raw dataset text; scroll horizontally for long lines")');
-    expect(html).toContain('scroller.setAttribute("aria-label", "HTML report; scroll horizontally to inspect wide content")');
+    expect(html).toContain('scroller.setAttribute("aria-label", "Static report preview; scroll horizontally for wide tables and images")');
     expect(html).not.toContain('identifier.textContent = string(value.id)');
     expect(html).not.toContain('" · HID "');
     expect(html).not.toContain("innerHTML");
-    expect(html).not.toMatch(/https?:\/\//);
+    expect(html.replaceAll("http://www.w3.org/1999/xhtml", "")).not.toMatch(/https?:\/\//);
     expect(() => new Function(html.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "")).not.toThrow();
 
     for (let version = 1; version <= 9; version += 1) {
@@ -299,8 +441,10 @@ describe("HTTP MCP service", () => {
       const result = await client.callTool({ name: "get_histories", arguments: { limit: 2 } });
       expect(result.structuredContent).toEqual({
         status: "connected",
+        galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
         instance: "galaxy.example.test",
-        message: "2 histories found.",
+        message: "2 histories returned.",
+        pagination: { offset: 0, limit: 2, returned: 2, has_more: false },
         histories: [
           { id: "h1", name: "RNA-seq", state: "ok", update_time: "2026-08-30T18:00:00Z", count: 4 },
           { id: "h2", name: "QC", state: "running" },
@@ -381,14 +525,17 @@ describe("HTTP MCP service", () => {
       const contents = await client.callTool({ name: "get_history_contents", arguments: { historyId: "h1", limit: 20 } });
       expect(contents.structuredContent).toMatchObject({ success: true, data: [{ id: "d1", state: "ok" }] });
       const historyDetails = await client.callTool({ name: "get_history_details", arguments: { historyId: "h1" } });
-      expect(historyDetails.structuredContent).toEqual({ id: "h1", name: "FastQC E2E", state: "ok", count: 3 });
+      expect(historyDetails.structuredContent).toEqual({ id: "h1", name: "FastQC E2E", state: "ok", count: 3,
+        galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
+      });
       expect(JSON.stringify(historyDetails)).not.toMatch(/private-user|private-name|state_ids/);
       const dataset = await client.callTool({ name: "get_dataset_details", arguments: { datasetId: "d1" } });
       expect(dataset.structuredContent).toMatchObject({ success: true, data: { id: "d1", file_ext: "fastqsanger" } });
       const rawInputText = await client.callTool({ name: "get_dataset_text", arguments: { datasetId: "d1" } });
-      expect(rawInputText).toMatchObject({ isError: true, content: [{ type: "text" }] });
+      expect(rawInputText).toMatchObject({ isError: true, content: expect.arrayContaining([{ type: "text", text: expect.stringContaining("reads only") }]) });
       const datasetText = await client.callTool({ name: "get_dataset_text", arguments: { datasetId: "d3", maxChars: 80 } });
       expect(datasetText.structuredContent).toEqual({
+        galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
         dataset_id: "d3",
         name: "FastQC RawData",
         extension: "txt",
@@ -398,7 +545,9 @@ describe("HTTP MCP service", () => {
       });
       const datasetHtml = await client.callTool({ name: "get_dataset_html", arguments: { datasetId: "d4" } });
       expect(datasetHtml.structuredContent).toEqual({
+        galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
         dataset_id: "d4",
+        url: "https://galaxy.example.test/datasets/d4/display",
         name: "FastQC Webpage",
         extension: "html",
         characters_returned: fastqcHtml.length,

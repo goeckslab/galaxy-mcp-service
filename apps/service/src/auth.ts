@@ -46,8 +46,12 @@ const activeTokenSchema = z
     aud: z.union([z.string(), z.array(z.string())]),
     client_id: z.string().min(1),
     exp: z.number().int(),
-    galaxy_api_key: z.string().min(1),
-    galaxy_instance: z.string().min(1),
+    galaxy_api_key: z.string().min(1).optional(),
+    galaxy_instance: z.string().min(1).optional(),
+    galaxy_url: z.string().min(1).optional(),
+    galaxy_connections: z.array(z.object({
+      instance: z.string().min(1), api_key: z.string().min(1), url: z.string().min(1),
+    }).strict()).min(1).max(10).optional(),
     iss: z.string().min(1),
     scope: z.union([z.string(), z.array(z.string())]),
     sub: z.string().min(1),
@@ -168,16 +172,21 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         ? parsed.data.scope
         : parsed.data.scope.split(/\s+/).filter(Boolean);
       const audiences = Array.isArray(parsed.data.aud) ? parsed.data.aud : [parsed.data.aud];
-      const baseUrl = instances.get(parsed.data.galaxy_instance);
+      const values = parsed.data.galaxy_connections ?? (parsed.data.galaxy_instance && parsed.data.galaxy_api_key
+        ? [{ instance: parsed.data.galaxy_instance, api_key: parsed.data.galaxy_api_key, url: parsed.data.galaxy_url }] : []);
       if (
         parsed.data.iss !== metadata.data.issuer ||
         !audiences.includes(resourceServerUrl.href) ||
         parsed.data.exp <= Date.now() / 1000 ||
-        baseUrl === undefined
+        !values.length ||
+        (parsed.data.galaxy_connections !== undefined && (parsed.data.galaxy_instance !== undefined || parsed.data.galaxy_api_key !== undefined || parsed.data.galaxy_url !== undefined)) ||
+        new Set(values.map(value => value.instance)).size !== values.length ||
+        values.some(value => !instances.has(value.instance) || (value.url !== undefined && value.url !== instances.get(value.instance)))
       ) {
         throw new OAuthError(OAuthErrorCode.InvalidToken, "The access token is not valid for this service.");
       }
 
+      const connections = values.map(value => ({ instance: value.instance, baseUrl: instances.get(value.instance)!, apiKey: value.api_key, fetchImpl }));
       return {
         token,
         clientId: parsed.data.client_id,
@@ -186,7 +195,8 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         resource: resourceServerUrl,
         extra: {
           subject: parsed.data.sub,
-          galaxy: { baseUrl, apiKey: parsed.data.galaxy_api_key, fetchImpl },
+          galaxies: connections,
+          ...(connections.length === 1 && { galaxy: connections[0] }),
         },
       };
     },

@@ -1,7 +1,7 @@
 import { createApp } from "./app.js";
 import { loadUniversalAuth } from "./auth.js";
 
-const host = process.env.HOST ?? "0.0.0.0";
+const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? "8080");
 if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("PORT must be an integer between 1 and 65535");
 const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();

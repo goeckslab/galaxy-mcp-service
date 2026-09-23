@@ -8,7 +8,7 @@ class Element {
   dataset: Record<string, string> = {};
   style: Record<string, string> = {};
   attrs = new Map<string, string>();
-  listeners = new Map<string, () => unknown>();
+  listeners = new Map<string, (event: { preventDefault: () => void }) => unknown>();
   hidden = false;
   disabled = false;
   focused = false;
@@ -16,21 +16,35 @@ class Element {
   className = "";
   tabIndex = -1;
   open = false;
-  srcdoc = "";
+  namespaceURI = "http://www.w3.org/1999/xhtml";
   private text = "";
   constructor(public tagName: string) {}
+  get nodeType() { return this.tagName === "#text" ? 3 : 1; }
+  get childNodes(): Element[] {
+    const text = new Element("#text");
+    text.textContent = this.text;
+    return [...(this.text ? [text] : []), ...this.children];
+  }
+  querySelector(tag: string): Element | undefined {
+    for (const child of this.children) {
+      if (child.tagName.toLowerCase() === tag) return child;
+      const match = child.querySelector(tag);
+      if (match) return match;
+    }
+  }
   get childElementCount() { return this.children.length; }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(""); }
   set textContent(value: string) { this.text = value; this.children = []; }
   get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })); }
   get outerHTML() { return "<html></html>"; }
   setAttribute(name: string, value: string) { this.attrs.set(name, value); }
+  getAttribute(name: string) { return this.attrs.get(name) ?? null; }
   removeAttribute(name: string) { this.attrs.delete(name); }
   append(...children: Element[]) { this.children.push(...children); }
   prepend(...children: Element[]) { this.children.unshift(...children); }
   replaceChildren(...children: Element[]) { this.text = ""; this.children = children; }
-  addEventListener(name: string, listener: () => unknown) { this.listeners.set(name, listener); }
-  click() { return this.listeners.get("click")?.(); }
+  addEventListener(name: string, listener: (event: { preventDefault: () => void }) => unknown) { this.listeners.set(name, listener); }
+  click(event = { preventDefault() {} }) { return this.listeners.get("click")?.(event); }
   focus() { this.focused = true; }
   remove() { this.removed = true; }
   getBoundingClientRect() { return { height: 500 }; }
@@ -39,7 +53,7 @@ class Element {
 interface Rpc {
   id?: number;
   method?: string;
-  params?: { name?: string; arguments?: Record<string, unknown> };
+  params?: { name?: string; arguments?: Record<string, unknown>; [key: string]: unknown };
 }
 
 const resources = new Map<string, string>();
@@ -51,47 +65,77 @@ registerHistorySummaryResource({
 const html = resources.get(HISTORY_SUMMARY_URI)!;
 const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1]!;
 
-function mount(initial?: unknown, options: { initialize?: boolean; reply?: (rpc: Rpc) => unknown; elements?: Element[] } = {}) {
+function mount(initial?: unknown, options: { initialize?: boolean; initializeResult?: unknown; standardHost?: boolean; intersectionObserver?: boolean; reply?: (rpc: Rpc) => unknown; elements?: Element[]; htmlText?: string } = {}) {
   const nodes = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1]!, new Element("DIV")]));
   const root = new Element("HTML");
   const head = new Element("HEAD");
   const timers = new Map<number, { callback: () => void; delay: number }>();
   const listeners = new Map<string, (event: unknown) => void>();
+  const documentListeners = new Map<string, (event: unknown) => void>();
+  const observers: { callback: (entries: { isIntersecting: boolean }[]) => void; active: boolean }[] = [];
   const calls: Rpc[] = [];
   let timerId = 0;
   const emit = (name: string, event: unknown) => listeners.get(name)?.(event);
   const parent = {
     postMessage(rpc: Rpc) {
       calls.push(rpc);
-      if (rpc.method === "ui/initialize" && options.initialize !== false) reply(rpc, {});
+      if (rpc.method === "ui/initialize" && options.initialize !== false) reply(rpc, options.initializeResult ?? {});
       else if (rpc.method === "tools/call" && options.reply) reply(rpc, options.reply(rpc));
+      else if (rpc.method === "ui/update-model-context") reply(rpc, {});
     },
   };
   function reply(rpc: Rpc, result: unknown) {
     emit("message", { source: parent, data: { jsonrpc: "2.0", id: rpc.id, result } });
   }
+  const document = {
+    getElementById: (id: string) => nodes.get(id), createElement: (tag: string) => new Element(tag.toUpperCase()),
+    createTextNode: (value: string) => { const node = new Element("#text"); node.textContent = value; return node; }, documentElement: root,
+    visibilityState: "visible", hidden: false,
+    addEventListener: (name: string, callback: (event: unknown) => void) => documentListeners.set(name, callback),
+  };
   const context = createContext({
-    window: { parent, openai: { toolOutput: initial, theme: "light" } },
-    document: { getElementById: (id: string) => nodes.get(id), createElement: (tag: string) => new Element(tag.toUpperCase()), documentElement: root },
+    URL,
+    window: { parent, ...(options.standardHost ? {} : { openai: { toolOutput: initial, theme: "light" } }) },
+    document,
     addEventListener: (name: string, callback: (event: unknown) => void) => listeners.set(name, callback),
     requestAnimationFrame: (callback: () => void) => callback(),
     setTimeout: (callback: () => void, delay: number) => { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout: (id: number) => timers.delete(id),
+    ...(options.intersectionObserver === false ? {} : { IntersectionObserver: class {
+      active = false;
+      constructor(public callback: (entries: { isIntersecting: boolean }[]) => void) { observers.push(this); }
+      observe() { this.active = true; }
+      disconnect() { this.active = false; }
+    } }),
     DOMParser: class {
       parseFromString() {
-        return { head, documentElement: root, createElement: (tag: string) => new Element(tag.toUpperCase()), querySelectorAll: (selector: string) => selector === "*" ? options.elements ?? [] : (options.elements ?? []).filter(element => selector.split(",").includes(element.tagName.toLowerCase())) };
+        const body = new Element("BODY");
+        body.textContent = options.htmlText ?? "";
+        body.append(...options.elements ?? []);
+        return { body };
       }
     },
   });
   runInContext(script, context);
   return {
     node: (id: string) => nodes.get(id)!, root, head, calls, timers, reply,
+    reject: (rpc: Rpc, error: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", id: rpc.id, error } }),
     pending: () => runInContext("pending.size", context) as number,
     notify: (value: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: value } } }),
+    hostContext: (value: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: value } }),
+    teardown: (id = 1000000) => emit("message", { source: parent, data: { jsonrpc: "2.0", id, method: "ui/resource-teardown", params: {} } }),
+    visibility: (visible: boolean) => {
+      document.visibilityState = visible ? "visible" : "hidden";
+      document.hidden = !visible;
+      documentListeners.get("visibilitychange")?.({});
+    },
+    intersect: (visible: boolean) => { for (const observer of observers) if (observer.active) observer.callback([{ isIntersecting: visible }]); },
     globals: (value: unknown) => emit("openai:set_globals", { detail: { globals: value } }),
     resize: () => emit("resize", {}),
     close: () => emit("pagehide", {}),
-    sanitize: () => runInContext('sandboxHtml("<fixture>")', context),
+    cache: () => emit("pagehide", { persisted: true }),
+    restore: () => emit("pageshow", { persisted: true }),
+    preview: () => runInContext('reportPreview("<fixture>")', context) as { preview: Element; limited: boolean },
     expire: (delay: number) => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); } },
   };
 }
@@ -101,30 +145,293 @@ const historyResult = { status: "connected", histories: [{ id: "private-history"
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("history result browser", () => {
+  it("loads remote histories five at a time, contracts locally and preserves source and navigation", async () => {
+    const galaxy = { instance: "eu", url: "https://usegalaxy.eu" };
+    const first = { status: "connected", galaxy, histories: items(5), pagination: { offset: 0, next_offset: 5, has_more: true } };
+    const ui = mount(first, { reply: rpc => {
+      const offset = Number(rpc.params?.arguments?.offset);
+      if (rpc.params?.name === "get_histories") return { structuredContent: {
+        status: "connected", galaxy, histories: items(offset === 5 ? 5 : 2, offset),
+        pagination: { offset, next_offset: offset + 5, has_more: offset === 5 },
+      } };
+      return { structuredContent: { success: true, galaxy, data: [] } };
+    } });
+    await flush();
+    expect(ui.node("histories").children).toHaveLength(5);
+    expect(ui.node("show-less").hidden).toBe(true);
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(10);
+    await ui.node("show-less").click();
+    expect(ui.node("histories").children).toHaveLength(5);
+    await ui.node("show-more").click(); // cached, no new network read
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(1);
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(12);
+    expect(ui.node("show-more").hidden).toBe(true);
+    await ui.node("histories").children[11]!.children[0]!.click();
+    await ui.node("history-back").click();
+    expect(ui.node("histories").children).toHaveLength(12);
+    expect(ui.calls.filter(call => call.params?.name === "get_histories").map(call => call.params?.arguments)).toEqual([
+      { instance: "eu", offset: 5, limit: 5 }, { instance: "eu", offset: 10, limit: 5 },
+    ]);
+    ui.notify(first);
+    expect(ui.node("histories").children).toHaveLength(12);
+  });
+
+  it("retains histories after page failure and ignores a late page after navigation", async () => {
+    const first = { status: "connected", histories: items(5), pagination: { offset: 0, next_offset: 5, has_more: true } };
+    const ui = mount(first);
+    await flush();
+    const failed = ui.node("show-more").click();
+    ui.reject(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { code: -32603 });
+    await failed;
+    expect(ui.node("histories").children).toHaveLength(5);
+    expect(ui.node("message").textContent).toContain("unchanged");
+    const more = ui.node("show-more").click();
+    const pageCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    const opened = ui.node("histories").children[0]!.children[0]!.click();
+    const historyCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    ui.reply(pageCall, { structuredContent: { ...first, histories: items(5, 5), pagination: { offset: 5, has_more: false } } });
+    await more;
+    ui.reply(historyCall, { structuredContent: { success: true, data: items(1) } });
+    await opened;
+    expect(ui.node("title").textContent).toBe("History contents");
+    expect(ui.node("histories").children).toHaveLength(1);
+    await ui.node("history-back").click();
+    expect(ui.node("histories").children).toHaveLength(5);
+  });
+
+  it("binds two cards, paging, reports and restored cards to their own source", async () => {
+    const sources = [{ instance: "us", url: "https://us.example.test" }, { instance: "eu", url: "https://eu.example.test" }];
+    const cards = sources.map(galaxy => mount({ ...historyResult, galaxy }, { reply: rpc => ({ structuredContent: {
+      galaxy, success: true, history_id: "private-history", data: items(5),
+      ...(rpc.params?.name === "get_dataset_text" ? { name: "Result", text: galaxy.instance + " evidence" }
+        : { pagination: { offset: 0, next_offset: 5, has_more: true } }),
+    } }) }));
+    await flush();
+    for (const [index, ui] of cards.entries()) {
+      expect(ui.node("instance").textContent).toContain(sources[index]!.instance);
+      await ui.node("histories").children[0]!.children[0]!.click();
+      await ui.node("show-more").click();
+      await ui.node("histories").children[0]!.children[0]!.click();
+      expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params?.name)).toEqual(["get_history_contents", "get_history_contents", "get_dataset_text"]);
+      expect(ui.calls.filter(call => call.method === "tools/call").every(call => call.params?.arguments?.instance === sources[index]!.instance)).toBe(true);
+      ui.cache(); ui.restore();
+      expect(ui.node("instance").textContent).toContain(sources[index]!.instance);
+    }
+    const direct = mount({ success: true, galaxy: sources[1], view: "dataset", data: [{ ...items(1)[0], extension: "html" }] }, {
+      reply: () => ({ structuredContent: { galaxy: sources[1], name: "Report", characters_returned: 13 }, _meta: { html: "<p>Report</p>" } }),
+    });
+    await flush();
+    expect(direct.calls.find(call => call.params?.name === "get_dataset_html")?.params?.arguments?.instance).toBe("eu");
+  });
+
+  it("rejects cross-site responses and ignores an old in-flight response after a new view arrives", async () => {
+    const us = { instance: "us", url: "https://us.example.test" };
+    const eu = { instance: "eu", url: "https://eu.example.test" };
+    const ui = mount({ ...historyResult, galaxy: us, presentation: { view_id: "us-view" } });
+    await flush();
+    const opening = ui.node("histories").children[0]!.children[0]!.click();
+    const first = ui.calls.find(call => call.method === "tools/call")!;
+    ui.reply(first, { structuredContent: { galaxy: eu, success: true, data: items(5) } });
+    await opening;
+    expect(ui.node("histories").children).toHaveLength(0);
+    expect(ui.node("message").textContent).toContain("could not be loaded");
+    ui.notify({ ...historyResult, galaxy: us, presentation: { view_id: "us-new" } });
+    const old = ui.node("histories").children[0]!.children[0]!.click();
+    const oldCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    ui.notify({ ...historyResult, galaxy: eu, presentation: { view_id: "eu-new" } });
+    ui.reply(oldCall, { structuredContent: { galaxy: us, success: true, data: items(5) } });
+    await old;
+    expect(ui.node("instance").textContent).toBe("eu · eu.example.test");
+    const current = ui.node("histories").children[0]!.children[0]!.click();
+    const currentCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    expect(currentCall.params?.arguments?.instance).toBe("eu");
+    ui.reply(currentCall, { structuredContent: { galaxy: eu, success: true, data: items(1) } });
+    await current;
+  });
+  it.each([true, false])("keeps the matching history link through paging and uses optional host navigation=%s", async supported => {
+    const url = "https://usegalaxy.eu/galaxy/histories/view?id=h1";
+    const page = { success: true, data: items(10), history_id: "h1", history_url: url };
+    const ui = mount(page, { initializeResult: { hostCapabilities: supported ? { openLinks: {} } : {} } });
+    await flush();
+    expect(ui.node("history-link").hidden).toBe(false);
+    expect(ui.node("history-link").getAttribute("href")).toBe(url);
+    await ui.node("show-more").click();
+    await ui.node("show-less").click();
+    expect(ui.node("history-link").getAttribute("href")).toBe(url);
+    let prevented = false;
+    const click = ui.node("history-link").click({ preventDefault: () => { prevented = true; } });
+    const open = ui.calls.find(call => call.method === "ui/open-link");
+    expect(prevented).toBe(supported);
+    if (supported) {
+      expect(open?.params).toEqual({ url });
+      ui.reject(open!, { code: -32000, message: "Denied" });
+      await click;
+      expect(ui.node("history-link-note").hidden).toBe(false);
+    } else expect(open).toBeUndefined();
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+    ui.notify({ ...historyResult, presentation: { view_id: "another-view" } });
+    expect(ui.node("history-link").hidden).toBe(true);
+    expect(ui.node("history-link").getAttribute("href")).toBeNull();
+    expect(ui.node("history-link-note").hidden).toBe(true);
+    expect(html).toContain('target="_blank" rel="noopener noreferrer"');
+  });
+
+  it.each([undefined, "javascript:alert(1)", "https://key:secret@example.test/histories/view?id=h1", "https://example.test/histories/view?id=other"])("does not expose a missing, unsafe or mismatched history link: %s", async history_url => {
+    const ui = mount({ success: true, data: items(1), history_id: "h1", history_url });
+    await flush();
+    expect(ui.node("history-link").hidden).toBe(true);
+    expect(ui.node("history-link").getAttribute("href")).toBeNull();
+  });
+
+  it("expands and collapses five at a time, keeping cached rows and keyboard focus", async () => {
+    const ui = mount({ success: true, data: items(12) });
+    await flush();
+    expect(ui.node("show-less").hidden).toBe(true);
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(10);
+    expect(ui.node("show-less").hidden).toBe(false);
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(12);
+    expect(ui.node("show-more").hidden).toBe(true);
+    await ui.node("show-less").click();
+    expect(ui.node("histories").children).toHaveLength(7);
+    await ui.node("show-less").click();
+    expect(ui.node("histories").children).toHaveLength(5);
+    expect(ui.node("show-less").hidden).toBe(true);
+    expect(ui.node("show-more").focused).toBe(true);
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(10);
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+  });
+
+  it("preserves search filters and collapsed rows when an older page arrives", async () => {
+    const page = { success: true, data: items(10), history_id: "h1", filters: { query: "result", extension: "txt", deleted: false, visible: true }, pagination: { offset: 0, returned: 10, has_more: true, next_offset: 140 } };
+    const ui = mount(page);
+    await flush();
+    await ui.node("show-more").click();
+    const more = ui.node("show-more").click();
+    const call = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    expect(call.params?.arguments).toEqual({ ...page.filters, historyId: "h1", limit: 5, offset: 140 });
+    await ui.node("show-less").click();
+    ui.reply(call, { structuredContent: { ...page, data: items(5, 10) } });
+    await more;
+    expect(ui.node("histories").children).toHaveLength(5);
+    expect(ui.node("show-more").disabled).toBe(false);
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(10);
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(1);
+  });
+
+  it.each([true, false])("opens a selected report directly with context support=%s, without listing a history", async supported => {
+    const ui = mount(undefined, {
+      standardHost: true, initialize: false,
+      reply: () => ({ structuredContent: { name: "HTML result", characters_returned: 18 }, _meta: { html: "<p>Test report</p>" } }),
+    });
+    ui.notify({ success: true, view: "dataset", presentation: { view_id: "current-view" }, data: [{ ...items(1)[0], extension: "html" }] });
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+    ui.reply(ui.calls.find(call => call.method === "ui/initialize")!, { hostCapabilities: { serverTools: {}, ...(supported && { updateModelContext: {} }) } });
+    await flush();
+    expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params?.name)).toEqual(["get_dataset_html"]);
+    expect(ui.node("dataset-detail").hidden).toBe(false);
+    expect(ui.node("detail-title").textContent).toBe("HTML result");
+    const updates = ui.calls.filter(call => call.method === "ui/update-model-context");
+    if (supported) {
+      expect(updates.at(-1)?.params?.structuredContent).toMatchObject({ view_id: "current-view", dataset_id: "private-dataset-0", report_status: "content_loaded", display_verified: false, report_content_in_feedback: false });
+      expect(updates.at(-1)?.params?.structuredContent).not.toHaveProperty("model_has_report_content");
+      expect(JSON.stringify(updates)).not.toContain("<p>");
+    } else expect(updates).toHaveLength(0);
+    await ui.node("detail-close").click();
+    expect(ui.node("histories").children).toHaveLength(1);
+    expect(ui.node("show-less").hidden).toBe(true);
+    expect(ui.node("show-more").hidden).toBe(true);
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(1);
+  });
+
+  it("correlates a new host view without accepting old card replays or late report content", async () => {
+    const ui = mount(undefined, { initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } } });
+    await flush();
+    const result = (id: string) => ({ success: true, view: "dataset", presentation: { view_id: id }, data: [{ ...items(1)[0], extension: "html" }] });
+    ui.notify(result("old-view"));
+    const oldCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    ui.notify(result("current-view"));
+    const currentCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    expect(currentCall.id).not.toBe(oldCall.id);
+    ui.notify(result("old-view"));
+    ui.reply(oldCall, { structuredContent: { name: "Old content" }, _meta: { html: "<p>Old</p>" } });
+    await flush();
+    expect(ui.node("detail-title").textContent).not.toBe("Old content");
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ view_id: "current-view", report_status: "loading", display_verified: false });
+    ui.reply(currentCall, { structuredContent: { name: "Current content" }, _meta: { html: "<p>Current</p>" } });
+    await flush();
+    expect(ui.node("detail-title").textContent).toBe("Current content");
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ view_id: "current-view", report_status: "content_loaded", display_verified: false });
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(2);
+    await ui.node("detail-close").click();
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ view_id: "current-view", report_status: "not_open", display_verified: false });
+  });
+
+  it.each([
+    ["txt", "error"], ["html", "error"], ["html", "timeout"], ["html", "missing_html"],
+  ])("reports %s load failure (%s) without claiming display, and recovers on retry", async (extension, failure) => {
+    const ui = mount({ success: true, view: "dataset", data: [{ ...items(1)[0], extension }] }, {
+      initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } },
+    });
+    await flush();
+    const call = ui.calls.find(call => call.method === "tools/call")!;
+    expect(call.params?.name).toBe(extension === "html" ? "get_dataset_html" : "get_dataset_text");
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ report_status: "loading", display_verified: false });
+    if (failure === "timeout") ui.expire(45000);
+    else ui.reply(call, failure === "error" ? { isError: true } : { structuredContent: { name: "HTML result" } });
+    await flush();
+    expect(ui.node("detail-message").textContent).toContain("could not be loaded");
+    expect(ui.node("detail-body").children).toHaveLength(0);
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ report_status: "load_failed", display_verified: false });
+    await ui.node("detail-close").click();
+    const button = ui.node("histories").children[0]!.children[0]!;
+    expect(button.disabled).toBe(false);
+    const retry = button.click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { name: "Recovered report", text: "Report text" }, _meta: { html: "<p>Report text</p>" } });
+    await retry;
+    expect(ui.node("detail-title").textContent).toBe("Recovered report");
+    expect(ui.node("detail-message").textContent).not.toContain("could not load");
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").some(call => (call.params?.structuredContent as { display_verified?: boolean })?.display_verified === true)).toBe(false);
+  });
+
   it("serves every published URI and reveals every returned item without inventing a total", async () => {
-    expect(resources.size).toBe(10);
+    expect(resources.size).toBe(18);
+    expect(html).toContain('alt="Galaxy" width="597" height="451" src="data:image/png;base64,');
     expect([...resources.values()].every(value => value === html)).toBe(true);
     const ui = mount({ success: true, data: items(25) });
-    expect(ui.node("histories").children).toHaveLength(20);
-    expect(ui.node("message").textContent).toContain("20 of 25 loaded");
+    await flush();
+    expect(ui.node("histories").children).toHaveLength(5);
+    expect(ui.node("message").textContent).toContain("5 of 25 loaded");
     expect(ui.node("histories").textContent).not.toContain("private-dataset");
-    await ui.node("show-more").click();
+    for (let page = 0; page < 4; page++) await ui.node("show-more").click();
     expect(ui.node("histories").children).toHaveLength(25);
     expect(ui.node("show-more").hidden).toBe(true);
     expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
     const histories = mount({ status: "connected", histories: items(25) }, { reply: () => ({ structuredContent: { success: true, data: [] } }) });
-    expect(histories.node("message").textContent).toContain("20 of 25 returned histories");
-    await histories.node("show-more").click();
+    await flush();
+    expect(histories.node("message").textContent).toContain("5 of 25 loaded histories");
+    expect(histories.node("show-less").hidden).toBe(true);
+    for (let page = 0; page < 4; page++) await histories.node("show-more").click();
     await histories.node("histories").children[24]!.children[0]!.click();
     await histories.node("history-back").click();
     expect(histories.node("histories").children).toHaveLength(25);
+    for (let page = 0; page < 4; page++) await histories.node("show-less").click();
+    expect(histories.node("histories").children).toHaveLength(5);
+    expect(histories.node("show-less").hidden).toBe(true);
+    expect(histories.node("show-more").textContent).toBe("Load more");
   });
 
   it("navigates a history, appends a remote page, and ignores host replay during browsing", async () => {
     const ui = mount(historyResult, { reply: rpc => {
       const offset = Number(rpc.params?.arguments?.offset);
-      return { structuredContent: { success: true, data: items(offset ? 1 : 20, offset), history_id: "private-history", pagination: { offset, limit: 20, returned: offset ? 1 : 20, has_more: !offset, next_offset: 20 } } };
+      return { structuredContent: { success: true, data: items(offset ? 1 : 5, offset), history_id: "private-history", pagination: { offset, limit: 5, returned: offset ? 1 : 5, has_more: !offset, next_offset: 5 } } };
     } });
+    await flush();
     await ui.node("histories").children[0]!.children[0]!.click();
     expect(ui.node("breadcrumbs").hidden).toBe(false);
     expect(ui.node("history-name").textContent).toBe("RNA analysis");
@@ -137,9 +444,9 @@ describe("history result browser", () => {
     expect(ui.calls.at(-1)?.method).toBe("ui/notifications/size-changed");
     await ui.node("show-more").click();
     expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params?.arguments)).toEqual([
-      { historyId: "private-history", limit: 20, offset: 0 }, { historyId: "private-history", limit: 20, offset: 20 },
+      { historyId: "private-history", limit: 5, offset: 0 }, { historyId: "private-history", limit: 5, offset: 5 },
     ]);
-    expect(ui.node("histories").children).toHaveLength(21);
+    expect(ui.node("histories").children).toHaveLength(6);
     expect(ui.node("show-more").hidden).toBe(true);
     await ui.node("history-back").click();
     expect(ui.node("histories").textContent).toContain("RNA analysis");
@@ -148,15 +455,101 @@ describe("history result browser", () => {
   });
 
   it("keeps prior results when pagination fails and permits retry", async () => {
-    const ui = mount({ success: true, data: items(20), history_id: "private-history", pagination: { offset: 0, returned: 20, has_more: true, next_offset: 20 } }, { reply: () => ({ isError: true }) });
+    const ui = mount({ success: true, data: items(5), history_id: "private-history", pagination: { offset: 0, returned: 5, has_more: true, next_offset: 5 } }, { reply: () => ({ isError: true }) });
+    await flush();
     await ui.node("show-more").click();
-    expect(ui.node("histories").children).toHaveLength(20);
+    expect(ui.node("histories").children).toHaveLength(5);
     expect(ui.node("show-more").textContent).toBe("Retry loading more");
     expect(ui.node("show-more").disabled).toBe(false);
   });
 
+  it.each(["success", "error", "timeout"])("keeps the selected report open when pending pagination ends with %s", async outcome => {
+    const page = { success: true, data: items(5), history_id: "private-history", pagination: { offset: 0, returned: 5, has_more: true, next_offset: 5 } };
+    const ui = mount(page);
+    await flush();
+    const more = ui.node("show-more").click();
+    const pageCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    const report = ui.node("histories").children[0]!.children[0]!.click();
+    const reportCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    const reportResult = { structuredContent: { name: "Selected report", text: "Selected result" } };
+    if (outcome !== "success") {
+      ui.reply(reportCall, reportResult);
+      await report;
+    }
+    if (outcome === "timeout") ui.expire(45000);
+    else ui.reply(pageCall, outcome === "error" ? { isError: true } : { structuredContent: { ...page, data: items(1, 5), pagination: { has_more: false } } });
+    await more;
+    expect(ui.node("dataset-detail").hidden).toBe(false);
+    if (outcome === "success") {
+      ui.reply(reportCall, reportResult);
+      await report;
+    }
+    expect(ui.node("detail-body").textContent).toContain("Selected result");
+    await ui.node("detail-close").click();
+    expect(ui.node("histories").children).toHaveLength(5);
+    expect(ui.node("show-more").disabled).toBe(false);
+    expect(ui.node("show-more").textContent).toBe("Load more");
+    const retry = ui.node("show-more").click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { ...page, data: items(1, 5), pagination: { has_more: false } } });
+    await retry;
+    expect(ui.node("histories").children).toHaveLength(6);
+  });
+
+  it("ignores an older report reply after returning and selecting another report", async () => {
+    const ui = mount({ success: true, data: items(2) });
+    await flush();
+    const first = ui.node("histories").children[0]!.children[0]!.click();
+    const firstCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    await ui.node("detail-close").click();
+    const second = ui.node("histories").children[1]!.children[0]!.click();
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { name: "Second report", text: "Current result" } });
+    await second;
+    ui.reply(firstCall, { structuredContent: { name: "First report", text: "Stale result" } });
+    await first;
+    expect(ui.node("detail-title").textContent).toBe("Second report");
+    expect(ui.node("detail-body").textContent).toContain("Current result");
+    expect(ui.node("detail-body").textContent).not.toContain("Stale result");
+  });
+
+  it.each([true, false])("gates remote browsing for serverTools=%s regardless of initialization order, while keeping local expansion", async supported => {
+    for (const snapshotFirst of [true, false]) {
+      for (const contents of [true, false]) {
+        const snapshot = contents
+          ? { success: true, data: items(25), history_id: "private-history", pagination: { has_more: true, next_offset: 25 } }
+          : { status: "connected", histories: items(25) };
+        const ui = mount(undefined, { standardHost: true, initialize: false });
+        if (snapshotFirst) {
+          ui.notify(snapshot);
+          expect(ui.node("histories").children[0]!.children[0]!.disabled).toBe(true);
+          await ui.node("histories").children[0]!.children[0]!.click();
+          expect(ui.node("histories").hidden).toBe(false);
+          for (let page = 0; page < 4; page++) await ui.node("show-more").click();
+          expect(ui.node("histories").children).toHaveLength(25);
+        }
+        ui.reply(ui.calls.find(call => call.method === "ui/initialize")!, { hostCapabilities: supported ? { serverTools: {} } : {} });
+        await flush();
+        if (!snapshotFirst) ui.notify(snapshot);
+        expect(ui.node("histories").children[0]!.children[0]!.disabled).toBe(!supported);
+        if (!supported) {
+          await ui.node("histories").children[0]!.children[0]!.click();
+          expect(ui.node("histories").hidden).toBe(false);
+          expect(ui.node("message").textContent).toContain("does not support browsing");
+        }
+        if (!snapshotFirst) {
+          expect(ui.node("show-more").disabled).toBe(false);
+          for (let page = 0; page < 4; page++) await ui.node("show-more").click();
+        }
+        expect(ui.node("histories").children).toHaveLength(25);
+        if (contents) expect(ui.node("show-more").disabled).toBe(!supported);
+        else expect(ui.node("show-more").hidden).toBe(true);
+        expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+      }
+    }
+  });
+
   it("does not replace Histories with a late response after Back", async () => {
     const ui = mount(historyResult);
+    await flush();
     const loading = ui.node("histories").children[0]!.children[0]!.click();
     await ui.node("history-back").click();
     ui.reply(ui.calls.find(call => call.method === "tools/call")!, { structuredContent: { success: true, data: items(1) } });
@@ -167,6 +560,7 @@ describe("history result browser", () => {
 
   it("times out absent host replies, restores controls, and clears pending work on close", async () => {
     const ui = mount({ success: true, data: items(1) });
+    await flush();
     const button = ui.node("histories").children[0]!.children[0]!;
     const loading = button.click();
     expect(ui.node("histories").hidden).toBe(true);
@@ -194,6 +588,7 @@ describe("history result browser", () => {
   it("shows real text and truncation with keyboard scrolling, then returns to results", async () => {
     const text = "gene\tsample\nTP53\t42";
     const ui = mount({ success: true, data: items(1) }, { reply: () => ({ structuredContent: { name: "Expression", text, truncated: true } }) });
+    await flush();
     await ui.node("histories").children[0]!.children[0]!.click();
     const raw = ui.node("detail-body").children[0]!.children[1]!;
     expect(raw.textContent).toBe(text);
@@ -204,7 +599,7 @@ describe("history result browser", () => {
     expect(ui.node("dataset-detail").hidden).toBe(true);
   });
 
-  it("retains local links and SVG references while removing external and executable attributes", () => {
+  it("rebuilds static report nodes without frames, executable markup, source attributes or external requests", () => {
     const anchor = new Element("A");
     anchor.setAttribute("href", "#statistics");
     anchor.setAttribute("target", "_top");
@@ -218,20 +613,96 @@ describe("history result browser", () => {
     unsafe.setAttribute("href", "javascript:alert(1)");
     const image = new Element("IMG");
     image.setAttribute("src", "https://example.test/image.png");
+    image.setAttribute("alt", "External plot omitted");
+    const raster = new Element("IMG");
+    raster.setAttribute("src", "data:image/png;base64,aGVsbG8=");
+    raster.setAttribute("onerror", "alert(1)");
+    const svgImage = new Element("IMG");
+    svgImage.setAttribute("src", "data:image/svg+xml;base64,aGVsbG8=");
     const scriptElement = new Element("SCRIPT");
-    const animation = new Element("SET");
-    animation.setAttribute("attributeName", "href");
-    animation.setAttribute("to", "https://example.test/");
-    const ui = mount(undefined, { elements: [anchor, use, external, unsafe, image, scriptElement, animation] });
-    ui.sanitize();
-    expect(anchor.attrs).toEqual(new Map([["href", "about:srcdoc#statistics"]]));
-    expect(use.attrs.get("xlink:href")).toBe("#plot-symbol");
-    expect(use.attrs.has("xml:base")).toBe(false);
-    expect(external.attrs.size + unsafe.attrs.size + image.attrs.size).toBe(0);
-    expect(scriptElement.removed).toBe(true);
-    expect(animation.removed).toBe(true);
-    expect(ui.head.children[0]!.attrs.get("content")).toContain("connect-src 'none'");
-    expect(html).toContain('frame.setAttribute("sandbox", "")');
+    scriptElement.textContent = "unsafe script";
+    const style = new Element("STYLE");
+    style.textContent = "body {display:none}";
+    const svg = new Element("SVG");
+    svg.namespaceURI = "http://www.w3.org/2000/svg";
+    svg.append(use);
+    const table = new Element("TABLE");
+    table.setAttribute("id", "detail-body");
+    table.setAttribute("style", "position:fixed");
+    const row = new Element("TR");
+    const cell = new Element("TD");
+    cell.textContent = "42 reads";
+    cell.setAttribute("colspan", "2");
+    cell.setAttribute("rowspan", "999999999");
+    row.append(cell); table.append(row);
+    const ui = mount(undefined, { elements: [anchor, external, unsafe, image, raster, svgImage, scriptElement, style, svg, table] });
+    const { preview, limited } = ui.preview();
+    expect(limited).toBe(false);
+    expect(preview.textContent).toBe("External plot omitted42 reads");
+    expect(preview.children.map(node => node.tagName)).toEqual(["#text", "IMG", "TABLE"]);
+    expect(preview.querySelector("img")?.attrs).toEqual(new Map([["src", "data:image/png;base64,aGVsbG8="], ["alt", "Report image"]]));
+    expect(preview.querySelector("table")?.attrs.size).toBe(0);
+    expect(preview.querySelector("td")?.attrs).toEqual(new Map([["colspan", "2"]]));
+    expect(table.attrs.get("id")).toBe("detail-body"); // Source nodes were not adopted or mutated.
+    expect(html).not.toMatch(/createElement\("iframe"\)|\.srcdoc|\.innerHTML\s*=/);
+  });
+
+  it.each([true, false])("shows a static report and the original Galaxy link with host navigation=%s", async supported => {
+    const reportText = "Quality summary\nReads\t42\n";
+    const ui = mount(undefined, {
+      standardHost: true,
+      initializeResult: { hostCapabilities: { serverTools: {}, ...(supported ? { openLinks: {} } : {}) } },
+      htmlText: reportText,
+      reply: () => ({ structuredContent: { name: "Quality report", dataset_id: "private-dataset-0", url: "https://usegalaxy.eu/galaxy/datasets/private-dataset-0/display" }, _meta: { html: "<h1>Quality summary</h1><table><tr><th>Reads</th><td>42</td></tr></table>" } }),
+    });
+    await flush();
+    ui.notify({ success: true, data: [{ ...items(1)[0], extension: "html" }] });
+    await ui.node("histories").children[0]!.children[0]!.click();
+    expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params)).toEqual([
+      { name: "get_dataset_html", arguments: { datasetId: "private-dataset-0" } },
+    ]);
+    const body = ui.node("detail-body");
+    expect(body.children[1]!.children[0]!.textContent).toBe(reportText);
+    expect(body.children[1]!.tabIndex).toBe(0);
+    expect(body.querySelector("iframe")).toBeUndefined();
+    expect(ui.node("detail-message").textContent).toContain("Static report preview");
+    expect(ui.node("report-link").hidden).toBe(false);
+    let prevented = false;
+    const opening = ui.node("report-link").click({ preventDefault: () => { prevented = true; } });
+    expect(prevented).toBe(supported);
+    if (supported) {
+      const request = ui.calls.find(call => call.method === "ui/open-link")!;
+      expect(request.params).toEqual({ url: "https://usegalaxy.eu/galaxy/datasets/private-dataset-0/display" });
+      ui.reject(request, { message: "Denied" });
+      await opening;
+      expect(ui.node("report-link-note").hidden).toBe(false);
+    }
+    await ui.node("detail-close").click();
+    expect(ui.node("report-link").hidden).toBe(true);
+    expect(ui.node("report-link").getAttribute("href")).toBeNull();
+    expect(ui.pending()).toBe(0);
+  });
+
+  it.each([undefined, "javascript:alert(1)", "https://key:secret@example.test/datasets/private-dataset-0/display", "https://example.test/datasets/other/display", "https://example.test/datasets/private-dataset-0/display?key=secret"])("rejects unsafe, credential-bearing or mismatched original-report links: %s", async url => {
+    const ui = mount({ success: true, data: [{ ...items(1)[0], extension: "html" }] }, {
+      reply: () => ({ structuredContent: { dataset_id: "private-dataset-0", url }, _meta: { html: "<p>Report</p>" } }),
+    });
+    await flush();
+    await ui.node("histories").children[0]!.children[0]!.click();
+    expect(ui.node("report-link").hidden).toBe(true);
+    expect(ui.node("report-link").getAttribute("href")).toBeNull();
+  });
+
+  it("bounds deeply nested and oversized report previews", () => {
+    const root = new Element("DIV");
+    let next = root;
+    for (let i = 0; i < 70; i++) { const child = new Element("DIV"); next.append(child); next = child; }
+    next.textContent = "Past depth limit";
+    const deep = mount(undefined, { elements: [root] }).preview();
+    expect(deep.limited).toBe(true);
+    expect(deep.preview.textContent).not.toContain("Past depth limit");
+    const wide = mount(undefined, { elements: Array.from({ length: 10002 }, () => new Element("BR")) }).preview();
+    expect(wide.limited).toBe(true);
   });
 });
 
@@ -242,9 +713,34 @@ const running = {
 };
 
 describe("run status card", () => {
+  it("keeps auto/manual refresh and result browsing on the original site, rejecting a different site's status", async () => {
+    const galaxy = { instance: "eu", url: "https://eu.example.test" };
+    const ui = mount({ success: true, galaxy, run: running });
+    await flush();
+    ui.intersect(true); ui.expire(15000);
+    const first = ui.calls.find(call => call.params?.name === "get_run_status")!;
+    expect(first.params?.arguments?.instance).toBe("eu");
+    ui.reply(first, { structuredContent: { success: true, galaxy: { instance: "us", url: "https://us.example.test" }, run: { ...running, state: "completed" } } });
+    await flush();
+    expect(ui.node("badge").textContent).toBe("Unconfirmed");
+    expect(ui.node("run-warning").textContent).toContain("Last known status: Running");
+    const manual = ui.node("run-refresh").click();
+    const second = ui.calls.filter(call => call.params?.name === "get_run_status").at(-1)!;
+    expect(second.params?.arguments?.instance).toBe("eu");
+    ui.reply(second, { structuredContent: { success: true, galaxy, run: { ...running, state: "completed" } } });
+    await manual;
+    const browsing = ui.node("run-results").click();
+    const contents = ui.calls.find(call => call.params?.name === "get_history_contents")!;
+    expect(contents.params?.arguments?.instance).toBe("eu");
+    ui.reply(contents, { structuredContent: { success: true, galaxy, data: items(1) } });
+    await browsing;
+    ui.cache(); ui.restore();
+    expect(ui.node("instance").textContent).toBe("eu · eu.example.test");
+  });
   it("refreshes a snapshot once without submitting jobs, then opens the existing result browser", async () => {
     const completed = { ...running, state: "completed", checked_at: "2026-09-05T12:05:00.000Z", jobs: { ...running.jobs, completed: 4, running: 0, queued: 0 } };
     const ui = mount({ success: true, run: running });
+    await flush();
     expect(ui.node("title").textContent).toBe("Read quality check");
     expect(ui.node("badge").textContent).toBe("Running");
     expect(ui.node("run-jobs").textContent).toContain("Completed jobs1");
@@ -279,13 +775,14 @@ describe("run status card", () => {
     expect(ui.node("run-results-note").textContent).toContain("other runs");
     expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params)).toEqual([
       { name: "get_run_status", arguments: { kind: "tool", runId: "private-run" } },
-      { name: "get_history_contents", arguments: { historyId: "private-history", limit: 20, offset: 0 } },
+      { name: "get_history_contents", arguments: { historyId: "private-history", limit: 5, offset: 0 } },
       { name: "get_dataset_text", arguments: { datasetId: "private-dataset-0" } },
     ]);
   });
 
   it("keeps the last known snapshot and checked time after an error or timeout, with a working retry", async () => {
     const ui = mount({ success: true, run: running });
+    await flush();
     const checked = ui.node("run-checked").textContent;
     const failed = ui.node("run-refresh").click();
     ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { isError: true, structuredContent: { success: false, run: { ...running, state: "unknown", checked_at: "2026-09-05T12:10:00.000Z" } } });
@@ -312,6 +809,7 @@ describe("run status card", () => {
 
   it("does not replace the result browser with late status or history responses", async () => {
     const ui = mount({ success: true, run: running });
+    await flush();
     const refresh = ui.node("run-refresh").click();
     const statusCall = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
     const results = ui.node("run-results").click();
@@ -330,6 +828,7 @@ describe("run status card", () => {
 
   it("uses human defaults and disables unavailable actions without inventing checks or results", async () => {
     const ui = mount({ success: false, run: { kind: "workflow", state: "unknown" } });
+    await flush();
     expect(ui.node("title").textContent).toBe("Galaxy workflow");
     expect(ui.node("run-refresh").disabled).toBe(true);
     expect(ui.node("run-results").disabled).toBe(true);
@@ -352,5 +851,303 @@ describe("run status card", () => {
     const skipped = mount({ success: true, run: { ...running, state: "empty", jobs: { other: 1, total: 1 } } });
     expect(skipped.node("badge").textContent).toBe("No analysis ran");
     expect(skipped.node("run-jobs").textContent).toContain("Total jobs1");
+  });
+});
+
+const statusCalls = (ui: ReturnType<typeof mount>) => ui.calls.filter(call => call.method === "tools/call" && call.params?.name === "get_run_status");
+const pollTimers = (ui: ReturnType<typeof mount>) => [...ui.timers.values()].filter(timer => timer.delay === 15000);
+
+describe("automatic run status updates", () => {
+  it.each([historyResult, { success: true, data: items(1) }, undefined])("reconnects history snapshots or the initial waiting view without replaying tools: %j", async snapshot => {
+    const ui = mount(snapshot, { initialize: false });
+    const previousRows = ui.node("histories").textContent;
+    ui.expire(15000);
+    await flush();
+    const reconnect = ui.node("view-reconnect").click();
+    ui.reply(ui.calls.filter(call => call.method === "ui/initialize").at(-1)!, { hostCapabilities: { serverTools: {} } });
+    await reconnect;
+    expect(ui.node("view-reconnect").hidden).toBe(true);
+    expect(ui.node("badge").textContent).not.toBe("Unavailable");
+    expect(ui.node("histories").textContent).toBe(previousRows);
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+    if (!snapshot) expect(ui.node("message").textContent).toContain("Waiting for Galaxy");
+    ui.teardown();
+    await ui.node("view-reconnect").click();
+    expect(ui.calls.filter(call => call.method === "ui/initialize")).toHaveLength(2);
+  });
+
+  it("recovers an initialization timeout without replacing its snapshot or replaying a tool", async () => {
+    const ui = mount({ success: true, run: running }, { initialize: false });
+    const firstInitialize = ui.calls.find(call => call.method === "ui/initialize")!;
+    const checked = ui.node("run-checked").textContent;
+    ui.expire(15000);
+    await flush();
+    expect(ui.node("view-reconnect").hidden).toBe(false);
+    expect(ui.node("run-refresh").disabled).toBe(true);
+    const reconnect = ui.node("view-reconnect").click();
+    await ui.node("view-reconnect").click();
+    const initializes = ui.calls.filter(call => call.method === "ui/initialize");
+    expect(initializes).toHaveLength(2);
+    ui.reply(firstInitialize, {});
+    expect(ui.node("run-refresh").disabled).toBe(true);
+    ui.reply(initializes[1]!, { hostCapabilities: { serverTools: {} } });
+    await reconnect;
+    expect(ui.node("view-reconnect").hidden).toBe(true);
+    expect(ui.node("run-refresh").disabled).toBe(false);
+    expect(ui.node("run-checked").textContent).toBe(checked);
+    expect(ui.node("badge").textContent).toBe("Unconfirmed");
+    expect(statusCalls(ui)).toHaveLength(0);
+    const refresh = ui.node("run-refresh").click();
+    ui.reply(statusCalls(ui)[0]!, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    await refresh;
+    expect(ui.node("badge").textContent).toBe("Completed");
+    expect(statusCalls(ui)[0]!.params?.arguments).toEqual({ kind: "tool", runId: "private-run" });
+  });
+
+  it.each([true, false])("resumes a back/forward-cached view with an in-flight status request=%s, without duplicate work", async inFlight => {
+    const ui = mount({ success: true, run: running });
+    await flush();
+    ui.intersect(true);
+    if (inFlight) ui.expire(15000);
+    ui.cache();
+    expect(pollTimers(ui)).toHaveLength(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(inFlight ? 1 : 0);
+    ui.restore();
+    if (inFlight) {
+      expect(pollTimers(ui)).toHaveLength(0);
+      expect(ui.node("run-refresh").disabled).toBe(true);
+      ui.reply(statusCalls(ui)[0]!, { structuredContent: { success: true, run: running } });
+      await flush();
+    }
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.expire(15000);
+    const latest = statusCalls(ui).at(-1)!;
+    ui.reply(latest, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    await flush();
+    expect(ui.node("badge").textContent).toBe("Completed");
+    expect(ui.pending()).toBe(0);
+    expect(ui.timers.size).toBe(0);
+    expect(ui.calls.filter(call => call.method === "tools/call").every(call => call.params?.name === "get_run_status" && call.params.arguments?.runId === "private-run")).toBe(true);
+    ui.teardown();
+    ui.restore();
+    await ui.node("run-refresh").click();
+    expect(ui.pending()).toBe(0);
+    expect(ui.timers.size).toBe(0);
+  });
+
+  it("keeps the same run after a host authentication error and only reads it again after manual retry", async () => {
+    const ui = mount({ success: true, run: running });
+    await flush();
+    ui.intersect(true);
+    const checked = ui.node("run-checked").textContent;
+    ui.expire(15000);
+    ui.reject(statusCalls(ui)[0]!, { code: -32001, message: "Authentication required: sensitive diagnostic" });
+    await flush();
+    expect(ui.node("badge").textContent).toBe("Unconfirmed");
+    expect(ui.node("run-checked").textContent).toBe(checked);
+    expect(ui.node("run-warning").textContent).toContain("reconnect Galaxy in your client");
+    expect(ui.node("run-warning").textContent).not.toContain("sensitive diagnostic");
+    expect(ui.timers.size).toBe(0);
+    const retry = ui.node("run-refresh").click();
+    ui.reply(statusCalls(ui)[1]!, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    await retry;
+    expect(ui.node("badge").textContent).toBe("Completed");
+    expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params)).toEqual([
+      { name: "get_run_status", arguments: { kind: "tool", runId: "private-run" } },
+      { name: "get_run_status", arguments: { kind: "tool", runId: "private-run" } },
+    ]);
+  });
+
+  it("keeps the snapshot but disables refresh when the host explicitly lacks server tools", async () => {
+    const ui = mount(undefined, { standardHost: true, initializeResult: { hostCapabilities: {} } });
+    await flush();
+    ui.notify({ success: true, run: running });
+    ui.intersect(true);
+    await ui.node("run-refresh").click();
+    await ui.node("run-results").click();
+    ui.expire(15000);
+    expect(ui.node("badge").textContent).toBe("Running");
+    expect(ui.node("run-auto").textContent).toContain("does not support refreshing");
+    expect(ui.node("run-refresh").disabled).toBe(true);
+    expect(ui.node("run-results").disabled).toBe(true);
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(0);
+    expect(ui.timers.size).toBe(0);
+  });
+
+  it.each(["accepted", "queued", "running"])("polls %s runs serially after initialization and stops at completion", async state => {
+    const ui = mount({ success: true, run: { ...running, state } }, { initialize: false });
+    await ui.node("run-refresh").click();
+    expect(statusCalls(ui)).toHaveLength(0);
+    expect(ui.pending()).toBe(1);
+    ui.reply(ui.calls.find(call => call.method === "ui/initialize")!, {});
+    await flush();
+    ui.intersect(true);
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(1);
+    expect(pollTimers(ui)).toHaveLength(0);
+    ui.expire(15000);
+    await ui.node("run-refresh").click();
+    expect(statusCalls(ui)).toHaveLength(1);
+    ui.reply(statusCalls(ui)[0]!, { structuredContent: { success: true, run: running } });
+    await flush();
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(2);
+    ui.reply(statusCalls(ui)[1]!, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    await flush();
+    expect(ui.node("badge").textContent).toBe("Completed");
+    expect(ui.timers.size).toBe(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(2);
+    expect(ui.calls.filter(call => call.method === "tools/call").every(call => call.params?.name === "get_run_status")).toBe(true);
+  });
+
+  it.each(["completed", "failed", "cancelled", "empty", "unknown"])("does not schedule checks for %s snapshots", async state => {
+    const ui = mount({ success: true, run: { ...running, state } });
+    await flush();
+    ui.intersect(true);
+    expect(ui.timers.size).toBe(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(0);
+  });
+
+  it("pauses after an automatic error or timeout, and a confirmed manual retry resumes polling", async () => {
+    const ui = mount({ success: true, run: running });
+    await flush();
+    ui.intersect(true);
+    const checked = ui.node("run-checked").textContent;
+    ui.expire(15000);
+    ui.reply(statusCalls(ui)[0]!, { isError: true });
+    await flush();
+    expect(ui.node("badge").textContent).toBe("Unconfirmed");
+    expect(ui.node("run-checked").textContent).toBe(checked);
+    expect(ui.timers.size).toBe(0);
+    const retry = ui.node("run-refresh").click();
+    ui.reply(statusCalls(ui)[1]!, { structuredContent: { success: true, run: running } });
+    await retry;
+    expect(pollTimers(ui)).toHaveLength(1);
+    const manual = ui.node("run-refresh").click();
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(3);
+    ui.reply(statusCalls(ui)[2]!, { structuredContent: { success: true, run: running } });
+    await manual;
+    ui.expire(15000);
+    ui.expire(45000);
+    await flush();
+    expect(ui.node("badge").textContent).toBe("Unconfirmed");
+    expect(ui.node("run-checked").textContent).toBe(checked);
+    expect(ui.pending()).toBe(0);
+    expect(ui.timers.size).toBe(0);
+  });
+
+  it("pauses hidden or offscreen cards and result browsing, resumes on return, and stops on pagehide", async () => {
+    const ui = mount({ success: true, run: running });
+    await flush();
+    ui.intersect(true);
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.visibility(false);
+    expect(ui.timers.size).toBe(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(0);
+    ui.visibility(true);
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.intersect(false);
+    expect(ui.timers.size).toBe(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(0);
+    ui.intersect(true);
+    expect(pollTimers(ui)).toHaveLength(1);
+
+    const results = ui.node("run-results").click();
+    expect(pollTimers(ui)).toHaveLength(0);
+    ui.reply(ui.calls.filter(call => call.method === "tools/call").at(-1)!, { structuredContent: { success: true, data: items(1) } });
+    await results;
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(0);
+    await ui.node("history-back").click();
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.expire(15000);
+    ui.reply(statusCalls(ui)[0]!, { structuredContent: { success: true, run: running } });
+    await flush();
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.close();
+    ui.visibility(true);
+    ui.intersect(true);
+    expect(ui.timers.size).toBe(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(1);
+  });
+
+  it("does not overlap status requests when navigating away and back before a response", async () => {
+    const ui = mount({ success: true, run: running });
+    await flush();
+    ui.intersect(true);
+    const refresh = ui.node("run-refresh").click();
+    const status = statusCalls(ui)[0]!;
+    const results = ui.node("run-results").click();
+    const history = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
+    await ui.node("history-back").click();
+    expect(ui.node("run-refresh").disabled).toBe(true);
+    expect(pollTimers(ui)).toHaveLength(0);
+    ui.expire(15000);
+    await ui.node("run-refresh").click();
+    expect(statusCalls(ui)).toHaveLength(1);
+    ui.reply(status, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    await refresh;
+    ui.reply(history, { structuredContent: { success: true, data: items(1) } });
+    await results;
+    expect(ui.node("badge").textContent).toBe("Running");
+    expect(ui.node("run-refresh").disabled).toBe(false);
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(2);
+    ui.close();
+    await flush();
+  });
+
+  it("uses document visibility when IntersectionObserver is unavailable, including responses received while hidden", async () => {
+    const ui = mount({ success: true, run: running }, { intersectionObserver: false });
+    await flush();
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.expire(15000);
+    ui.visibility(false);
+    ui.reply(statusCalls(ui)[0]!, { structuredContent: { success: true, run: running } });
+    await flush();
+    expect(ui.timers.size).toBe(0);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(1);
+    ui.visibility(true);
+    expect(pollTimers(ui)).toHaveLength(1);
+    ui.close();
+  });
+
+  it("handles standard MCP Apps results, theme changes, and teardown without OpenAI globals", async () => {
+    const ui = mount(undefined, { standardHost: true, initializeResult: { hostContext: { theme: "dark" } } });
+    await flush();
+    expect(ui.root.style.colorScheme).toBe("dark");
+    ui.notify({ success: true, run: running });
+    expect(ui.node("title").textContent).toBe("Read quality check");
+    ui.hostContext({ theme: "light" });
+    expect(ui.root.style.colorScheme).toBe("light");
+    ui.hostContext({ theme: "invalid" });
+    expect(ui.root.style.colorScheme).toBe("light");
+    ui.intersect(true);
+    ui.expire(15000);
+    const pendingStatus = statusCalls(ui)[0]!;
+    expect(ui.pending()).toBe(1);
+    // Host request IDs have their own namespace and can match an outstanding app request.
+    ui.teardown(pendingStatus.id);
+    await flush();
+    expect(ui.pending()).toBe(0);
+    expect(ui.timers.size).toBe(0);
+    expect(ui.calls.some(call => call.id === pendingStatus.id && !call.method && "result" in call)).toBe(true);
+    ui.reply(pendingStatus, { structuredContent: { success: true, run: { ...running, state: "completed" } } });
+    ui.visibility(true);
+    ui.intersect(true);
+    ui.expire(15000);
+    expect(statusCalls(ui)).toHaveLength(1);
+    expect(ui.node("badge").textContent).not.toBe("Completed");
   });
 });

@@ -33,11 +33,16 @@ describe("Galaxy tool contract", () => {
 
     expect(response.status).toBe(200);
     expect(tools.map(({ name }) => name)).toEqual([
+      "get_galaxy_connections",
       "get_histories",
-      ...productOperations.map(({ name }) => name),
+      "show_histories",
+      ...productOperations.flatMap(({ name }) => name === "get_history_contents" ? [name, "show_history"] : [name]),
+      "show_dataset",
       "get_run_status",
+      "show_run_status",
       "get_dataset_text",
       "get_dataset_html",
+      "read_dataset_report",
     ]);
     expect(tools.map(({ name }) => name)).not.toContain("read_probe");
     for (const tool of tools) {
@@ -45,32 +50,56 @@ describe("Galaxy tool contract", () => {
         readOnlyHint: expect.any(Boolean),
         destructiveHint: expect.any(Boolean),
         idempotentHint: expect.any(Boolean),
-        openWorldHint: true,
+        openWorldHint: expect.any(Boolean),
       });
       expect(JSON.stringify(tool.inputSchema)).not.toMatch(/api[_-]?key|password|secret|token/i);
+      if (tool.name !== "get_galaxy_connections") {
+        expect(tool.inputSchema).toHaveProperty("properties.instance.type", "string");
+        expect(tool.outputSchema).toHaveProperty("properties.galaxy.properties.instance.type", "string");
+      }
     }
-    expect(tools[0]).toMatchObject({
-      name: "get_histories",
+    expect(tools.filter(({ annotations }) => annotations.openWorldHint).map(({ name }) => name).sort()).toEqual([
+      "get_server_info", "search_tools_by_name", "get_tool_details", "get_tool_citations",
+      "get_tool_run_examples", "get_tool_input_template", "upload_file_from_url", "run_tool",
+      "invoke_workflow", "search_iwc_workflows", "recommend_iwc_workflows",
+      "get_iwc_workflow_details", "import_workflow_from_iwc",
+    ].sort());
+    for (const name of ["get_user", "get_histories", "get_history_contents", "show_dataset", "get_dataset_text", "get_dataset_html", "read_dataset_report", "get_run_status", "create_history", "cancel_workflow_invocation"]) {
+      expect(tools.find((tool) => tool.name === name)?.annotations.openWorldHint).toBe(false);
+    }
+    expect(tools.find(({ name }) => name === "show_histories")).toMatchObject({
+      name: "show_histories",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
     });
-    expect(tools.find(({ name }) => name === "get_history_contents")).toMatchObject({
-      name: "get_history_contents",
+    expect(tools.find(({ name }) => name === "get_histories")?.inputSchema).toMatchObject({
+      properties: { limit: { default: 5 }, offset: { default: 0 } },
+    });
+    expect(tools.filter(tool => (tool._meta?.ui as { resourceUri?: string } | undefined)?.resourceUri).map(tool => tool.name)).toEqual([
+      "show_histories", "show_history", "show_dataset", "show_run_status",
+    ]);
+    expect(tools.find(({ name }) => name === "show_history")).toMatchObject({
+      name: "show_history",
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
     });
     expect(tools.find(({ name }) => name === "get_history_contents")?.inputSchema).toMatchObject({
       properties: {
-        limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+        limit: { type: "integer", minimum: 1, maximum: 100, default: 5 },
         offset: { type: "integer", minimum: 0, default: 0 },
       },
     });
-    expect(tools.find(({ name }) => name === "get_run_status")).toMatchObject({
+    expect(tools.find(({ name }) => name === "show_run_status")).toMatchObject({
       inputSchema: { type: "object", required: ["kind", "runId"], additionalProperties: false },
       outputSchema: { type: "object", required: ["success", "run"] },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
     });
-    for (const name of ["run_tool", "invoke_workflow", "get_tool_request_status", "get_invocations"]) {
+    expect(tools.find(({ name }) => name === "show_dataset")).toMatchObject({
+      inputSchema: { type: "object", required: ["datasetId"], additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+      _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
+    });
+    for (const name of ["get_histories", "get_history_contents", "get_run_status", "run_tool", "invoke_workflow", "get_tool_request_status", "get_invocations"]) {
       expect(tools.find((tool) => tool.name === name)?._meta ?? {}).not.toHaveProperty("ui.resourceUri");
     }
     expect(tools.find(({ name }) => name === "get_history_details")?.outputSchema).toMatchObject({
@@ -108,9 +137,15 @@ describe("Galaxy tool contract", () => {
       },
       outputSchema: {
         type: "object",
-        required: ["dataset_id", "name", "extension", "characters_returned", "truncated"],
+        required: ["dataset_id", "url", "name", "extension", "characters_returned", "truncated"],
       },
     });
+    expect(tools.find(({ name }) => name === "read_dataset_report")).toMatchObject({
+      inputSchema: { type: "object", required: ["datasetId"], additionalProperties: false },
+      outputSchema: { type: "object", properties: { source_sha256: { type: "string" }, next_page: { type: "integer" } } },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    });
+    expect(tools.find(({ name }) => name === "read_dataset_report")?._meta ?? {}).not.toHaveProperty("ui.resourceUri");
     expect(tools.find(({ name }) => name === "run_tool")?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
