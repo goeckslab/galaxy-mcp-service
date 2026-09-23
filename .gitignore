@@ -4,6 +4,15 @@ dist/
 coverage/
 data/
 artifacts/
+conversations/
+to-do.md
+AGENTS.md
+agents.md
 .env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.DS_Store
 *.tsbuildinfo
 *.log

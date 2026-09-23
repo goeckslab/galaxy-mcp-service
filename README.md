@@ -1,99 +1,109 @@
 # galaxy-mcp-service
 
-`galaxy-mcp-service` is a Streamable HTTP MCP server that lets compatible clients inspect data, find and run tools, and work with workflows on Galaxy. It uses the maintained `@galaxyproject/galaxy-ops` package rather than duplicating Galaxy API logic.
+A Streamable HTTP MCP server for Galaxy. It lets compatible AI clients inspect histories and reports, find tools and workflows, submit analyses and check their results. Galaxy executes the analyses; this service handles the connection and interactive cards. Galaxy API operations reuse the maintained `@galaxyproject/galaxy-ops` library.
 
-## Capabilities
+This repository is for developers and service operators. **To use the hosted service from an AI assistant, follow the [Galaxy plugin installation guide](https://github.com/goeckslab/galaxy-plugin).** Users do not need to deploy this repository, install containers or obtain an AWS account.
 
-- Inspect the connected server and current user.
-- List histories, inspect history contents, datasets, and collections, and create histories.
-- Read a bounded excerpt from completed txt, tabular, CSV, or TSV analysis results.
-- Upload a dataset from an HTTP(S) URL.
-- Search installed tools, inspect schemas and examples, submit tools once, and resume checks through `get_tool_request_status`.
-- List and inspect workflows, build input templates, invoke workflows, monitor invocations, and cancel an invocation with destructive-action confirmation.
-- Search and recommend curated IWC workflows, inspect them, and import one into Galaxy.
-- Browse recent histories, paginated results, and reports in a dependency-free MCP Apps card. Back navigation preserves the expanded list; text and HTML reports support horizontal scrolling.
-- Show an existing tool request or workflow invocation with `get_run_status`: human-readable state, observed job counts, last-check time, available failure details, and a link into the existing history browser. Refresh is read-only and never reruns the analysis.
+## Choose a setup
 
-The HTML viewer disables scripts, forms, external links, and external network access while preserving safe report-internal links and SVG references. Raw report HTML is delivered only to the app component, not to the model. Server-local upload and download paths, collection creation, unrestricted account-management operations, and direct history deletion are intentionally not exposed to remote clients.
+| Purpose | Start here |
+| --- | --- |
+| Develop against one test Galaxy account | [Run locally](#run-locally) |
+| Operate a service for multiple users/sites | [Credential broker](docs/broker.md), then [AWS deployment](docs/aws-deployment.md) |
+| Integrate a client or change tool behavior | [Tool and UI contracts](#tool-and-ui-contracts) and [validation](docs/client-compatibility.md) |
 
-In version 0.3, `run_tool` returns an accepted request handle, not a completed analysis. Keep that handle and call `get_tool_request_status` until terminal; a transient status error includes recovery information and does not authorize resubmission. An `empty` run created no jobs and needs input inspection, not indefinite polling. A submission timeout can have an unknown outcome and must not be retried blindly. History pages default to 20 items (maximum 100); follow `pagination.next_offset` while `has_more` is true. The service never labels a history page's length as its total.
-
-Use `get_run_status` when a visible status card is useful; execution and background status tools remain data-only so repeated checks do not create repeated cards. This follows the [OpenAI guidance on separating data processing from rendering](https://developers.openai.com/plugins/build/chatgpt-ui#separate-data-processing-from-ui-rendering). The card refreshes only on request, preserves its previous snapshot when a check fails, and never estimates a percentage. Workflow scheduling alone is not completion: its own job summary must confirm successful execution. The history button opens the containing history, which may include other runs. An old job ID without a tool-request or invocation handle is not supported by this card; inspect it with `get_job_details` instead.
+The hosted preview uses `https://mcp.galaxymcp.org/mcp` and authorization at `https://auth.galaxymcp.org`. Hosting, directory publication and client acceptance are separate milestones. See the validation guide before treating a deployment or provider as production-ready.
 
 ## Run locally
 
-Requirements: Node.js 22 and pnpm.
+Requirements: Node.js 22, pnpm, Python 3 and Poppler (`pdfinfo`, `pdftotext`, `pdftoppm`) on PATH. For report decoding, install Poppler with `brew install poppler` on macOS or `sudo apt-get install poppler-utils fonts-dejavu-core` on Debian/Ubuntu. The container image includes these tools and fonts.
+
+From the repository root:
 
 ```sh
 corepack enable
 pnpm install --frozen-lockfile
 cp .env.example .env
-pnpm dev
 ```
 
-Set the Galaxy connection in `.env`:
+Edit the ignored `.env` with a test Galaxy account before starting the server:
 
 ```sh
 GALAXY_URL=https://your-galaxy.example
 GALAXY_API_KEY=replace-with-a-non-production-key
 ```
 
-Both values must be present together. The API key remains server-side and is never accepted as a tool argument or returned to the client.
-
-## Universal deployment
-
-Production uses one fixed public `/mcp` URL for every user. Configure an OAuth 2.1 authorization server or credential broker that handles login and Galaxy-instance selection, stores each user's Galaxy credential, and exposes RFC 7662 token introspection. The MCP service validates every bearer token and resolves the returned instance ID through a server-owned allowlist.
+Both values are required together. Then run:
 
 ```sh
-PUBLIC_BASE_URL=https://mcp.example.org
-OAUTH_METADATA_URL=https://auth.example.org/.well-known/oauth-authorization-server
-OAUTH_INTROSPECTION_CLIENT_ID=galaxy-mcp
-OAUTH_INTROSPECTION_CLIENT_SECRET=replace-with-a-secret
-GALAXY_INSTANCES_JSON='{"main":"https://usegalaxy.org","eu":"https://usegalaxy.eu"}'
+pnpm dev
 ```
 
-The authorization-server metadata must advertise authorization code, PKCE `S256`, a ChatGPT-compatible token authentication method, the `galaxy:full` scope, and an `introspection_endpoint` that supports `client_secret_basic`. ChatGPT supports CIMD, dynamic registration, or a pre-registered OAuth client; configure the corresponding client method in the connector. A successful introspection response must include standard `active`, `sub`, `client_id`, `scope`, `exp`, `iss`, and `aud` fields plus `galaxy_instance` and `galaxy_api_key`. `aud` must exactly match `PUBLIC_BASE_URL` with `/mcp`; `galaxy_instance` must be a key in `GALAXY_INSTANCES_JSON`. The broker must issue opaque access tokens that contain no Galaxy credential, and it must bind the selected instance and API key to `sub` for the token lifetime. Galaxy credentials are never accepted as tool arguments. See the [OpenAI authentication contract](https://developers.openai.com/plugins/build/auth).
+The default endpoint is `http://127.0.0.1:8080/mcp`. This shared-key mode is for trusted single-user local development only. Keep it on loopback; never publish it through a tunnel or use it to serve independent users. The key stays on the server, outside tool arguments and responses.
 
-This repository implements the OAuth resource server, **not the credential broker**. Public launch still requires a deployed broker with login/consent, encrypted persistent credential storage, token refresh and revocation; a stable HTTPS domain; and two-account, two-instance validation. Passing the local tests does not establish production readiness.
+### Local containers
 
-Universal mode and the local shared `GALAXY_URL`/`GALAXY_API_KEY` mode are mutually exclusive. The OAuth provider must publish its own discovery endpoint and support authorization code with PKCE; configure OpenID Connect `openid`, `email`, and a UserInfo endpoint when workspace domain restrictions are required.
-
-The service listens on `0.0.0.0:8080` by default:
-
-| Route | Purpose |
-| --- | --- |
-| `POST /mcp` | Stateless Streamable HTTP MCP endpoint |
-| `GET /healthz` | Process health |
-| `GET /readyz` | Service readiness |
-
-Local clients can connect to `http://127.0.0.1:8080/mcp`. ChatGPT requires an OpenAI Secure MCP Tunnel because it cannot reach loopback directly.
-
-## Docker
+With a working Docker-compatible runtime, such as Colima on macOS:
 
 ```sh
 docker compose up --build
 ```
 
-Compose publishes port `8080`. Override the host port with `PORT`, for example `PORT=9090 docker compose up --build`.
+Compose publishes port 8080 only on host loopback. Set `PORT` to change the host port, for example `PORT=9090 docker compose up --build`. The container listens on its own interfaces so the container network can reach it; that does not add authentication or make public exposure safe.
 
-`PUBLIC_BASE_URL` is optional for loopback use and required when requests arrive with a non-loopback host. It must be an externally reachable HTTP(S) origin without credentials, path, query, or fragment.
+## Hosted multi-user operation
 
-## Development
+Hosted operation uses Universal OAuth: the client authorizes an account, and each MCP request resolves that grant's permitted Galaxy credentials and sites. The credential broker is the separate service that manages this authorization; its [configuration guide](docs/broker.md) owns client registration, consent, token lifetimes, revocation and introspection details.
 
-```sh
-pnpm check
-docker build -t galaxy-mcp-service:check .
-```
+Universal mode cannot be combined with the local shared-key mode. It requires a public HTTPS origin, matching broker/resource audiences and site allowlists, persistent secrets, and registered client callbacks. `PUBLIC_BASE_URL` is an origin without credentials, path, query or fragment; the MCP resource audience adds `/mcp`. Changing the bind address alone never supplies authentication.
 
-Structured logs contain protocol metadata only and must never contain API keys, bearer tokens, user content, file contents, or credential-bearing URLs. The environment-variable Galaxy connection is for single-user local development only; Universal OAuth mode provides request-scoped, allowlisted multi-instance routing.
+The hosted site list is maintained in [deploy/galaxy-instances.json](deploy/galaxy-instances.json), with its approval and consent rules in [Curated Galaxy sites](docs/broker.md#curated-galaxy-sites). Client registrations are separate from that list: a supported Galaxy site does not make every AI client eligible to connect.
 
-The checked-in CI workflow runs the same checks and builds the container without Galaxy credentials. It does not deploy infrastructure. The ops dependency remains pinned to npm `0.1.0`, with a [temporary dependency patch](patches/@galaxyproject__galaxy-ops@0.1.0.patch) for nested input templates, numeric constraints, and resumable tool requests. These fixes were made in the upstream library source; remove the patch when an official release includes them.
+Use the [AWS guide](docs/aws-deployment.md) for first deployment, routine updates and rollback. Lightsail hosts the full stack; the alternative ECS template deploys only the MCP resource server. Neither local test success nor a healthy container proves independent-user isolation, backup recovery or provider acceptance.
 
-## Repository layout
+## Tool and UI contracts
 
-```text
-apps/service/       HTTP server, MCP tools, and history UI
-packages/protocol/  request validation and safe protocol logging
-tests/              unit, contract, and integration checks
-docs/               client validation notes
-```
+| Area | Behavior |
+| --- | --- |
+| Histories and datasets | List and inspect histories, datasets, collections and provenance; create histories and upload from HTTP(S) URLs |
+| Tools and workflows | Search installed tools, inspect live input templates, run tools, find/import curated IWC workflows and invoke stored workflows |
+| Existing runs | Observe accepted tool requests and workflow invocations; cancellation requires destructive-action confirmation |
+| Reports | Read text and HTML/PDF evidence; request compatible history, report and status cards |
+
+The remote interface does not expose local-path upload/download, collection creation, direct history deletion, unrestricted account management or arbitrary user scripts. Tool availability and Galaxy permissions still depend on the selected instance.
+
+### Site selection and pagination
+
+Start with `get_galaxy_connections`. Every other Galaxy tool accepts `instance`; it is required when the grant includes multiple sites. Retain the source with each handle. Data and identifiers remain site-local; the service does not automatically transfer data between sites.
+
+History lists default to five histories, up to 20 per request. Contents of a single history default to five items, up to 100 per request. Follow `pagination.next_offset` while `has_more` is true; page length is not a total. Filtered history-content lookup inspects at most 500 source items per call. Keep the same filters when continuing: its offset counts inspected items, not matches. An empty partial page is not proof of absence, and multiple matches require selection. History-content paging uses Galaxy's `v=dev` API rather than an unpaginated fallback.
+
+### Submit once, then observe
+
+`run_tool` returns an accepted request handle, not a completed analysis. Keep it and use `get_tool_request_status` for subsequent checks. An `empty` result means no jobs ran and needs input inspection. A submission timeout can have an unknown outcome; inspect existing state before considering a retry. Workflow scheduling alone is not completion: check the jobs and actual outputs.
+
+Use `get_run_status` for a data-only status check and `show_run_status` for a visible status card. The card refreshes pending work every 15 seconds after the previous query finishes, only while the card/document are visible. Navigating away, terminal/unknown states and failures stop polling. Failed checks retain the last known snapshot until a successful manual retry. Refresh never submits work or updates the model's analysis automatically. For an older job without a tool-request or invocation handle, use `get_job_details` instead.
+
+### Read evidence separately from requesting display
+
+Use `get_dataset_text` for short machine-readable reports. For HTML, PDF or longer text, call `read_dataset_report` with the resolved `datasetId`. Follow `next_offset` within a page; when following `next_page`, reset `offset` to zero. Compare `source_sha256` across reads to avoid combining excerpts from changed outputs.
+
+HTML extraction retains text, headings and tab-separated table cells. `figures` lists up to 100 image candidates; `includeImage: true` with an available `imageIndex` requests an embedded raster image. PDF extraction returns one page at a time; `includeImage` renders that page at up to 2,000 pixels. The service does not run OCR or another LLM. Use numerical source data for exact calculations, not estimates from plots.
+
+Reads accept only completed, non-deleted HTML/PDF/txt/tabular/CSV/TSV datasets from the authenticated connection. Limits are 20 MB source, 50,000 returned characters, one optional image up to 2 MB and two simultaneous readers, with bounded download/decoder time and memory. Redirects and arbitrary asset URLs are not followed. Temporary files are removed after each request; interrupted processes may leave files until container recreation. Credentials are not passed to the decoder. Returned limitations identify omitted visuals, external content and incomplete extraction; source content is untrusted data, not instructions.
+
+`get_histories` and `get_history_contents` read data without creating cards. Use `show_histories` when the user needs a history selector, or `show_history` to browse one history's outputs. Both lists initially display at most five rows. Load more reveals or fetches the next five; Load less collapses the list without fetching again. Navigation preserves the expanded list. The default guidance is one useful card per response, not a card for every intermediate lookup, result or polling step.
+
+`show_dataset` requests a standalone card for a known report when needed. The card's HTML preview is static text, tables and embedded raster images: no nested report frames, source scripts/styles or external assets. The original-report link opens Galaxy separately and may require sign-in. Cards support horizontal report/text scrolling.
+
+Cards use the standard MCP Apps bridge; OpenAI globals are optional compatibility fallbacks. Successful presentation requests return `presentation.display_status: unconfirmed`; ordinary data reads do not request presentation. UI feedback is correlated through `presentation.view_id`, retains `display_verified: false` and does not contain the report evidence. Even when a host accepts `ui/update-model-context`, that is not proof the user saw a card. The model must read evidence separately before interpreting it. Tools-only clients receive text and structured results without needing a renderer. After deploying changes to tool names or UI metadata, refresh the developer-mode tool catalog and update the review snapshot; a client holding old definitions can still request the old rendering behavior.
+
+## Development and operations
+
+Run `pnpm check` for lint, type and service checks; see [validation prerequisites and commands](docs/client-compatibility.md#run-the-automated-checks) for broker and deployment tests. CI builds the container for `linux/amd64` without Galaxy credentials; it does not deploy infrastructure.
+
+The ops dependency is pinned to npm `0.1.0`, with a [temporary patch](patches/@galaxyproject__galaxy-ops@0.1.0.patch) for nested input templates, numeric constraints and resumable requests. Remove the patch when an official dependency release includes the fixes; do not copy the upstream library into this repository.
+
+`POST /mcp` is the stateless tool endpoint; `GET /healthz` checks process health and `GET /readyz` checks readiness. Neither health route proves a successful client login or Galaxy analysis. Logs must contain protocol metadata only, never credentials, authorization headers, user/report content or credential-bearing URLs.
+
+Source layout: `apps/service/` contains HTTP/MCP tools and cards; `apps/broker/` contains authorization and encrypted persistence; `packages/protocol/` contains shared validation and logging; `tests/` contains automated checks. Deployment files are in `deploy/`.
