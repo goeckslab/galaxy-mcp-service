@@ -1,0 +1,109 @@
+{
+  "name": "galaxy-mcp",
+  "services": {
+    "proxy": {
+      "image": "caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648",
+      "restart": "unless-stopped",
+      "ports": ["80:80", "443:443"],
+      "environment": {
+        "MCP_HOST": "${MCP_HOST:?Set the owned MCP hostname}",
+        "BROKER_HOST": "${BROKER_HOST:?Set the owned broker hostname}"
+      },
+      "volumes": [
+        "./Caddyfile:/etc/caddy/Caddyfile:ro",
+        "caddy-data:/data",
+        "caddy-config:/config"
+      ],
+      "networks": {
+        "app": { "aliases": ["${BROKER_HOST:?Set the owned broker hostname}"] }
+      },
+      "read_only": true,
+      "tmpfs": ["/tmp"],
+      "cap_drop": ["ALL"],
+      "cap_add": ["NET_BIND_SERVICE"],
+      "security_opt": ["no-new-privileges:true"],
+      "mem_limit": "128m",
+      "logging": { "driver": "local", "options": { "max-size": "10m", "max-file": "3" } }
+    },
+    "mcp": {
+      "image": "${GALAXY_MCP_IMAGE:?Set the locally built release image}",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "command": ["node", "apps/service/dist/index.js"],
+      "environment": {
+        "NODE_ENV": "production",
+        "HOST": "0.0.0.0",
+        "PORT": "8080",
+        "PUBLIC_BASE_URL": "https://${MCP_HOST:?Set the owned MCP hostname}",
+        "OAUTH_METADATA_URL": "https://${BROKER_HOST:?Set the owned broker hostname}/.well-known/oauth-authorization-server",
+        "OAUTH_INTROSPECTION_CLIENT_ID": "galaxy-mcp-resource-server",
+        "OAUTH_INTROSPECTION_CLIENT_SECRET": "${BROKER_RESOURCE_CLIENT_SECRET:?Set the persistent resource-client secret}",
+        "GALAXY_INSTANCES_JSON": "${GALAXY_INSTANCES_JSON:?Set the approved Galaxy instance map}"
+      },
+      "depends_on": {
+        "broker": { "condition": "service_healthy" },
+        "proxy": { "condition": "service_started" }
+      },
+      "networks": ["app"],
+      "read_only": true,
+      "tmpfs": ["/tmp"],
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "mem_limit": "512m",
+      "logging": { "driver": "local", "options": { "max-size": "10m", "max-file": "3" } }
+    },
+    "broker": {
+      "image": "${GALAXY_MCP_IMAGE:?Set the locally built release image}",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "command": ["node", "apps/broker/dist/index.js"],
+      "environment": {
+        "NODE_ENV": "production",
+        "HOST": "0.0.0.0",
+        "PORT": "8080",
+        "BROKER_ISSUER": "https://${BROKER_HOST:?Set the owned broker hostname}",
+        "BROKER_RESOURCE": "https://${MCP_HOST:?Set the owned MCP hostname}/mcp",
+        "BROKER_TRUST_PROXY": "1",
+        "BROKER_DATABASE_URL": "postgresql://galaxy_broker:${POSTGRES_PASSWORD:?Set a persistent URL-safe database password}@postgres:5432/galaxy_broker",
+        "BROKER_ENCRYPTION_KEY": "${BROKER_ENCRYPTION_KEY:?Set the persistent encryption key}",
+        "BROKER_COOKIE_KEYS_JSON": "${BROKER_COOKIE_KEYS_JSON:?Set persistent cookie keys}",
+        "BROKER_JWKS_JSON": "${BROKER_JWKS_JSON:?Set the persistent private signing JWK set}",
+        "BROKER_CLIENTS_JSON": "${BROKER_CLIENTS_JSON:?Register real client IDs and exact callbacks}",
+        "BROKER_RESOURCE_CLIENT_ID": "galaxy-mcp-resource-server",
+        "BROKER_RESOURCE_CLIENT_SECRET": "${BROKER_RESOURCE_CLIENT_SECRET:?Set the persistent resource-client secret}",
+        "GALAXY_INSTANCES_JSON": "${GALAXY_INSTANCES_JSON:?Set the approved Galaxy instance map}"
+      },
+      "depends_on": { "postgres": { "condition": "service_healthy" } },
+      "networks": ["app", "database"],
+      "read_only": true,
+      "tmpfs": ["/tmp"],
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "mem_limit": "512m",
+      "logging": { "driver": "local", "options": { "max-size": "10m", "max-file": "3" } }
+    },
+    "postgres": {
+      "image": "postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_USER": "galaxy_broker",
+        "POSTGRES_DB": "galaxy_broker",
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:?Set a persistent URL-safe database password}",
+        "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256"
+      },
+      "volumes": ["postgres-data:/var/lib/postgresql/data"],
+      "networks": ["database"],
+      "healthcheck": {
+        "test": ["CMD", "pg_isready", "-U", "galaxy_broker", "-d", "galaxy_broker"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 10,
+        "start_period": "20s"
+      },
+      "mem_limit": "384m",
+      "logging": { "driver": "local", "options": { "max-size": "10m", "max-file": "3" } }
+    }
+  },
+  "networks": { "app": {}, "database": { "internal": true } },
+  "volumes": { "postgres-data": {}, "caddy-data": {}, "caddy-config": {} }
+}

@@ -1,0 +1,123 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Galaxy MCP resource server on ECS Express Mode. Requires an existing production OAuth broker; does not create one or configure a custom domain.",
+  "Parameters": {
+    "ServiceName": {
+      "Type": "String",
+      "AllowedPattern": "[a-z][a-z0-9-]{0,49}",
+      "Description": "Unique service name in the default ECS cluster. Changing it replaces the service."
+    },
+    "ImageUri": {
+      "Type": "String",
+      "AllowedPattern": "[a-zA-Z0-9][a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}",
+      "Description": "Reviewed linux/amd64 image in ECR, pinned by sha256 digest, not a mutable tag."
+    },
+    "ExecutionRoleArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z0-9-]+:iam::[0-9]{12}:role/[a-zA-Z0-9+=,.@_/-]+",
+      "Description": "Existing ECS task execution role: image pull, logs, and read access to only the specified secret (plus its KMS key if needed)."
+    },
+    "InfrastructureRoleArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z0-9-]+:iam::[0-9]{12}:role/[a-zA-Z0-9+=,.@_/-]+",
+      "Description": "Existing infrastructure role with the ECS Express Gateway Services trust and permissions."
+    },
+    "PublicSubnetA": {
+      "Type": "AWS::EC2::Subnet::Id",
+      "Description": "Approved PUBLIC subnet with an Internet Gateway route and at least 8 free IPs."
+    },
+    "PublicSubnetB": {
+      "Type": "AWS::EC2::Subnet::Id",
+      "Description": "Approved PUBLIC subnet in the same VPC but a DIFFERENT availability zone; at least 8 free IPs."
+    },
+    "PublicBaseUrl": {
+      "Type": "String",
+      "AllowedPattern": "https://(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}",
+      "Description": "Owned HTTPS origin, without trailing slash or path. Configure this hostname on the ALB listener, certificate, and DNS separately."
+    },
+    "OAuthMetadataUrl": {
+      "Type": "String",
+      "AllowedPattern": "https://(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}/[^\\s?#@]+",
+      "Description": "Existing broker discovery URL. Must advertise PKCE S256, galaxy:full, and client_secret_basic introspection."
+    },
+    "IntrospectionClientId": {
+      "Type": "String",
+      "AllowedPattern": "\\S+",
+      "Description": "Dedicated confidential resource-server client authorized to obtain Galaxy credentials through introspection."
+    },
+    "IntrospectionSecretArn": {
+      "Type": "String",
+      "AllowedPattern": "arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[a-zA-Z0-9/_+=.@-]+",
+      "Description": "Full ARN of an existing Secrets Manager secret in this Region. Entire SecretString must be the nonempty client secret, not JSON. Never enter the secret itself here."
+    },
+    "GalaxyInstancesJson": {
+      "Type": "String",
+      "MinLength": 3,
+      "Description": "Nonempty JSON map of approved instance names to HTTPS Galaxy URLs, without credentials. Validated by the service at startup."
+    }
+  },
+  "Rules": {
+    "DistinctSubnets": {
+      "Assertions": [{
+        "Assert": { "Fn::Not": [{ "Fn::Equals": [{ "Ref": "PublicSubnetA" }, { "Ref": "PublicSubnetB" }] }] },
+        "AssertDescription": "Select two distinct public subnets; also verify they belong to different availability zones in the same VPC."
+      }]
+    }
+  },
+  "Resources": {
+    "GalaxyService": {
+      "Type": "AWS::ECS::ExpressGatewayService",
+      "Properties": {
+        "ServiceName": { "Ref": "ServiceName" },
+        "Cpu": "256",
+        "Memory": "512",
+        "ExecutionRoleArn": { "Ref": "ExecutionRoleArn" },
+        "InfrastructureRoleArn": { "Ref": "InfrastructureRoleArn" },
+        "HealthCheckPath": "/readyz",
+        "NetworkConfiguration": {
+          "Subnets": [{ "Ref": "PublicSubnetA" }, { "Ref": "PublicSubnetB" }]
+        },
+        "PrimaryContainer": {
+          "Image": { "Ref": "ImageUri" },
+          "ContainerPort": 8080,
+          "Environment": [
+            { "Name": "NODE_ENV", "Value": "production" },
+            { "Name": "HOST", "Value": "0.0.0.0" },
+            { "Name": "PORT", "Value": "8080" },
+            { "Name": "PUBLIC_BASE_URL", "Value": { "Ref": "PublicBaseUrl" } },
+            { "Name": "OAUTH_METADATA_URL", "Value": { "Ref": "OAuthMetadataUrl" } },
+            { "Name": "OAUTH_INTROSPECTION_CLIENT_ID", "Value": { "Ref": "IntrospectionClientId" } },
+            { "Name": "GALAXY_INSTANCES_JSON", "Value": { "Ref": "GalaxyInstancesJson" } }
+          ],
+          "Secrets": [{
+            "Name": "OAUTH_INTROSPECTION_CLIENT_SECRET",
+            "ValueFrom": { "Ref": "IntrospectionSecretArn" }
+          }]
+        },
+        "ScalingTarget": {
+          "AutoScalingMetric": "AVERAGE_CPU",
+          "AutoScalingTargetValue": 60,
+          "MinTaskCount": 1,
+          "MaxTaskCount": 2
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ServiceArn": { "Value": { "Fn::GetAtt": ["GalaxyService", "ServiceArn"] } },
+    "PublicMcpUrl": {
+      "Description": "Usable only after the custom hostname has a valid ALB certificate, listener rule, and DNS record.",
+      "Value": { "Fn::Sub": "${PublicBaseUrl}/mcp" }
+    },
+    "ManagedEndpoint": {
+      "Description": "AWS-assigned endpoint. Health checks work here; MCP rejects this Host when PublicBaseUrl is a different hostname.",
+      "Value": { "Fn::GetAtt": ["GalaxyService", "Endpoint"] }
+    },
+    "HttpsListenerArn": {
+      "Value": { "Fn::GetAtt": ["GalaxyService", "ECSManagedResourceArns.IngressPath.ListenerArn"] }
+    },
+    "ListenerRuleArn": {
+      "Value": { "Fn::GetAtt": ["GalaxyService", "ECSManagedResourceArns.IngressPath.ListenerRuleArn"] }
+    }
+  }
+}

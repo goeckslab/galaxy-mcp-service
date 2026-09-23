@@ -1,0 +1,18 @@
+{
+	admin off
+	cert_issuer acme {
+		dir https://acme-v02.api.letsencrypt.org/directory
+	}
+	# Request-error logs can include OAuth callback query strings; retain process/TLS logs only.
+	log default {
+		exclude http.log.error
+	}
+}
+
+{$MCP_HOST} {
+	reverse_proxy mcp:8080
+}
+
+{$BROKER_HOST} {
+	reverse_proxy broker:8080
+}

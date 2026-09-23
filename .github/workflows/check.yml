@@ -12,6 +12,26 @@ jobs:
         with:
           node-version: '22'
       - run: corepack enable
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3 poppler-utils fonts-dejavu-core
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      - run: docker build -t galaxy-mcp-service:check .
+      - run: python3 -B -m unittest discover -s tests/deploy
+      - run: pnpm test:broker
+      - run: docker build --platform linux/amd64 -t galaxy-mcp-service:check .
+      - name: Smoke-test the native x86 container
+        run: |
+          check_container=$(docker run --detach --rm --health-interval=1s galaxy-mcp-service:check)
+          trap 'docker stop "$check_container" >/dev/null' EXIT
+          for attempt in {1..30}; do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' "$check_container")" = healthy ]; then
+              docker exec "$check_container" node --input-type=module -e '
+                import assert from "node:assert/strict";
+                assert.notEqual(process.getuid(), 0);
+                await import("./apps/broker/dist/broker.js");
+                assert.equal((await fetch("http://127.0.0.1:8080/readyz")).status, 200);
+              '
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1

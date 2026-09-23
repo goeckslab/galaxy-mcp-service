@@ -1,25 +1,33 @@
-FROM node:22-bookworm-slim AS build
+FROM node:22-bookworm-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends python3 poppler-utils fonts-dejavu-core && apt-get clean
+
+FROM base AS build
 
 WORKDIR /app
 RUN corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig*.json ./
 COPY apps/service/package.json apps/service/package.json
+COPY apps/broker/package.json apps/broker/package.json
 COPY packages/protocol/package.json packages/protocol/package.json
 COPY patches patches
 RUN pnpm install --frozen-lockfile
 
 COPY apps apps
 COPY packages packages
-RUN pnpm build
+COPY tests tests
+COPY deploy deploy
+COPY eslint.config.mjs vitest.config.ts ./
+RUN pnpm check
 
-FROM node:22-bookworm-slim AS runtime
+FROM base AS runtime
 
 WORKDIR /app
 RUN corepack enable && chown node:node /app
 
-COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=node:node LICENSE package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY --chown=node:node apps/service/package.json apps/service/package.json
+COPY --chown=node:node apps/broker/package.json apps/broker/package.json
 COPY --chown=node:node packages/protocol/package.json packages/protocol/package.json
 COPY --chown=node:node patches patches
 
@@ -27,6 +35,8 @@ USER node
 RUN pnpm install --prod --frozen-lockfile
 
 COPY --chown=node:node --from=build /app/apps/service/dist apps/service/dist
+COPY --chown=node:node --from=build /app/apps/service/src/report-reader.py apps/service/dist/report-reader.py
+COPY --chown=node:node --from=build /app/apps/broker/dist apps/broker/dist
 COPY --chown=node:node --from=build /app/packages/protocol/dist packages/protocol/dist
 
 ENV NODE_ENV=production \

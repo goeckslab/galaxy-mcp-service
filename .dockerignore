@@ -1,6 +1,8 @@
 .git
 node_modules
 **/dist
+**/._*
+**/.DS_Store
 data
 artifacts
 .env
