@@ -977,7 +977,7 @@ const HTML = `<!doctype html>
       histories.setAttribute("aria-busy", "true");
       sendSize();
       try {
-        const result = await request("tools/call", { name: "get_history_contents", arguments: { historyId: string(value.id), limit: CONTENT_PAGE_SIZE, offset: 0 } });
+        const result = await request("tools/call", { name: "get_history_contents", arguments: { historyId: string(value.id), order: "newest", limit: CONTENT_PAGE_SIZE, offset: 0 } });
         if (requestId !== viewRequestId) return;
         if (result?.isError || result?.structuredContent?.success !== true || !Array.isArray(result.structuredContent.data)) throw new Error("History unavailable");
         currentContents = result.structuredContent;
@@ -1049,11 +1049,15 @@ const HTML = `<!doctype html>
       showMore.disabled = true;
       showMore.textContent = "Loading…";
       try {
-        const result = await request("tools/call", { name: "get_history_contents", arguments: { ...currentContents.filters, historyId: string(currentHistory.id), limit: CONTENT_PAGE_SIZE, offset } });
+        const result = await request("tools/call", { name: "get_history_contents", arguments: { ...currentContents.filters, order: currentContents.order ?? "newest", historyId: string(currentHistory.id), limit: CONTENT_PAGE_SIZE, offset } });
         if (requestId !== viewRequestId || detailId !== detailRequestId) return;
         const page = result?.structuredContent;
         if (result?.isError || page?.success !== true || !Array.isArray(page.data)) throw new Error("Page unavailable");
-        currentContents = { ...page, data: [...previous.data, ...page.data] };
+        // An item added since the last page moves a newest-first listing down by one; show each once.
+        // A dataset and a collection can carry the same id, so the kind is part of the key.
+        const key = item => item.history_content_type + ":" + item.id;
+        const loaded = new Set(previous.data.map(key));
+        currentContents = { ...page, data: [...previous.data, ...page.data.filter(item => !loaded.has(key(item)))] };
         visibleCount = Math.min(visibleCount + CONTENT_PAGE_SIZE, currentContents.data.length);
         renderContents(currentContents, !!workspaceConnections && !datasetDetail.hidden);
       } catch {

@@ -128,7 +128,8 @@ const historyContentsOutput = operationOutput.extend({
     deleted: z.boolean().optional(),
     purged: z.boolean().optional(),
     visible: z.boolean().optional(),
-  })).optional().describe("History items in order, each a dataset or a collection"),
+  })).optional().describe("History items in the order asked for, each a dataset or a collection"),
+  order: z.enum(["oldest", "newest"]).optional().describe("The order of data, by history number"),
   history_id: z.string().optional(),
   history_name: z.string().optional().describe("On the first page"),
   history_url: z.string().optional(),
@@ -262,7 +263,11 @@ async function runHistoryContents(args: Record<string, unknown>, connection: Gal
   // Bound lookup to 500 inspected items per call; next_offset resumes larger histories.
   const scanLimit = searching ? 500 : limit;
   const galaxy = context(connection, AbortSignal.any([signal, AbortSignal.timeout(30_000)]));
-  const filters = ["deleted", "visible"].filter(key => typeof args[key] === "boolean");
+  // As Galaxy's history panel: hidden and deleted items are listed only when asked for.
+  const deleted = args.deleted === true;
+  const visible = args.visible !== false;
+  const order = args.order === "newest" ? "newest" : "oldest";
+  const scope = `${visible ? "visible" : "hidden"}, ${deleted ? "deleted" : "non-deleted"} items`;
   // The first page also names its history, so a card opened straight on it can say which one.
   const named = offset === 0
     ? galaxy.client.GET("/api/histories/{history_id}", {
@@ -276,8 +281,8 @@ async function runHistoryContents(args: Record<string, unknown>, connection: Gal
       const result = await galaxy.client.GET("/api/histories/{history_id}/contents", {
         params: {
           path: { history_id: String(args.historyId) },
-          query: { v: "dev", order: "hid-asc", offset: nextOffset, limit: pageSize + 1,
-            q: filters, qv: filters.map(key => String(args[key])) },
+          query: { v: "dev", order: order === "newest" ? "hid-dsc" : "hid-asc", offset: nextOffset, limit: pageSize + 1,
+            q: ["deleted", "visible"], qv: [String(deleted), String(visible)] },
         },
       });
       if (result.error) return structured({ success: false, message: "Galaxy could not return this history page; no completeness claim can be made." });
@@ -304,13 +309,14 @@ async function runHistoryContents(args: Record<string, unknown>, connection: Gal
   return structured({
     success: true,
     data,
+    order,
     history_id: args.historyId,
     ...(typeof historyName === "string" && { history_name: historyName }),
     history_url: new URL(`histories/view?id=${encodeURIComponent(String(args.historyId))}`, `${connection.baseUrl.replace(/\/$/, "")}/`).href,
-    filters: { query, extension, deleted: args.deleted, visible: args.visible },
+    filters: { query, extension, deleted, visible },
     message: searching
-      ? `${data.length} matches in ${nextOffset - offset} inspected items. ${complete ? "The requested history scope was fully searched." : "This is a partial search, not proof of absence or uniqueness."} Multiple matches are candidates, not an automatic selection.`
-      : `${data.length} items returned. ${complete ? "The requested history scope is complete." : "This is a history page, not the whole history."} Listing an item does not open its report.`,
+      ? `${data.length} matches in ${nextOffset - offset} inspected ${scope}. ${complete ? `All ${scope} of the history were searched.` : "This is a partial search, not proof of absence or uniqueness."} Multiple matches are candidates, not an automatic selection.`
+      : `${data.length} ${scope} returned, ${order} first. ${complete ? `These are all ${scope} of the history.` : "This is a history page, not the whole history."} Listing an item does not open its report.`,
     ...(searching && { search: { query, extension, scanned: nextOffset - offset, complete } }),
     pagination: {
       offset, limit, returned: data.length, has_more: hasMore,
@@ -520,9 +526,13 @@ async function runGalaxyOperation(
   return structured(result);
 }
 
-function operationInputSchema(operation: AnyOperation) {
+function operationInputSchema(operation: AnyOperation, name: string = operation.name) {
   const input = { ...operation.input };
   if (operation.name === "get_history_contents") {
+    input.deleted = z.boolean().default(false).describe("true lists the deleted items instead");
+    input.visible = z.boolean().default(true).describe("false lists the hidden items instead, such as the datasets inside a collection or made by a run over one");
+    // The card reads like Galaxy's history panel; a lookup keeps its offsets while a run adds items.
+    input.order = z.enum(["oldest", "newest"]).default(name === "show_history" ? "newest" : "oldest").describe("By history number. Offsets from an oldest-first listing stay valid while a run adds items.");
     input.limit = z.number().int().min(1).max(100).default(5).describe("Maximum returned items or matches; the card initially shows 5. Check pagination before whole-history claims.");
     input.offset = z.number().int().min(0).default(0).describe("Offset from pagination.next_offset for the next page");
     input.query = z.string().trim().min(1).max(200).optional().describe("Case-insensitive name substring; scans at most 500 items per call. Keep this filter when resuming next_offset.");
@@ -610,13 +620,13 @@ function registerGalaxyOperation(server: McpServer, operation: AnyOperation, con
     {
       title: name.replaceAll("_", " "),
       description: operation.name === "get_history_contents"
-        ? (rendersHistoryContents ? "Show one interactive history card for user browsing; prefer this over separate cards for each dataset. " : "Read history data without creating a card. Use for intermediate lookups and report discovery; show_history is the separate presentation action. ") + "Return compact dataset/collection summaries or find candidates by name/format. Filtered lookup inspects at most 500 items per call; continue from pagination.next_offset with the same filters. A partial or empty page does not prove absence or uniqueness. Use show_dataset only when a standalone report card is needed."
+        ? (rendersHistoryContents ? "Show one interactive history card for user browsing; prefer this over separate cards for each dataset. " : "Read history data without creating a card. Use for intermediate lookups and report discovery; show_history is the separate presentation action. ") + "Return compact dataset/collection summaries or find candidates by name/format. Hidden and deleted items are left out unless asked for, as in Galaxy's history panel. Filtered lookup inspects at most 500 items per call; continue from pagination.next_offset with the same filters. A partial or empty page does not prove absence or uniqueness. Use show_dataset only when a standalone report card is needed."
         : operation.name === "get_dataset_details"
           ? "Read a known dataset's metadata and Galaxy-generated peek summary when available. Useful for binary, oversized or specialized datatypes. This is not full-file evidence; use read_dataset_report for supported content or open the original in Galaxy."
           : name === "run_tool" ? `${operation.summary} Give purpose, a few words on why, so the reason is saved on the outputs.`
             : name === "create_history" ? `${operation.summary} Give purpose, a few words on why, so the reason is saved as its annotation.`
             : operation.summary,
-      inputSchema: operationInputSchema(operation).extend(instanceInput),
+      inputSchema: operationInputSchema(operation, name).extend(instanceInput),
       outputSchema: (operation.name === "get_history_details" ? historyDetailsOutput
         : operation.name === "get_history_contents" ? historyContentsOutput : operationOutput).extend(sourceOutput),
       annotations: {

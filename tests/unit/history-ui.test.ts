@@ -574,7 +574,7 @@ describe("history result browser", () => {
       expect(tools(ui)).toEqual([
         ["start_file_upload", { historyId: "h1", fileName: "counts.tsv", size: 25, instance: "us" }],
         ["finish_file_upload", { historyId: "h1", fileName: "counts.tsv", sessionId: "0123456789abcdef", instance: "us" }],
-        ["get_history_contents", { historyId: "h1", limit: 5, offset: 0, instance: "us" }],
+        ["get_history_contents", { historyId: "h1", order: "newest", limit: 5, offset: 0, instance: "us" }],
       ]);
       expect(ui.node("upload-note").textContent).toContain("counts.tsv is in Galaxy");
       expect(ui.node("upload-note").hidden).toBe(false);
@@ -676,13 +676,14 @@ describe("history result browser", () => {
   });
 
   it("preserves search filters and collapsed rows when an older page arrives", async () => {
-    const page = { success: true, data: items(10), history_id: "h1", filters: { query: "result", extension: "txt", deleted: false, visible: true }, pagination: { offset: 0, returned: 10, has_more: true, next_offset: 140 } };
+    const page = { success: true, data: items(10), order: "oldest", history_id: "h1", filters: { query: "result", extension: "txt", deleted: false, visible: true }, pagination: { offset: 0, returned: 10, has_more: true, next_offset: 140 } };
     const ui = mount(page);
     await flush();
     await ui.node("show-more").click();
     const more = ui.node("show-more").click();
     const call = ui.calls.filter(call => call.method === "tools/call").at(-1)!;
-    expect(call.params?.arguments).toEqual({ ...page.filters, historyId: "h1", limit: 5, offset: 140 });
+    // The next page keeps the order and the filters of the listing the assistant asked for.
+    expect(call.params?.arguments).toEqual({ ...page.filters, order: "oldest", historyId: "h1", limit: 5, offset: 140 });
     await ui.node("show-less").click();
     ui.reply(call, { structuredContent: { ...page, data: items(5, 10) } });
     await more;
@@ -832,6 +833,19 @@ describe("history result browser", () => {
     expect(ui.node("manage-connections").disabled).toBe(false);
   });
 
+  it("shows an item once when a new one moved the next newest-first page down", async () => {
+    const dataset = (index: number) => ({ ...items(1, index)[0]!, history_content_type: "dataset" });
+    // Galaxy numbers datasets and collections separately, so the two kinds can share an id.
+    const collection = { id: dataset(4).id, name: "Paired reads", state: "ok", history_content_type: "dataset_collection" };
+    const first = { success: true, order: "newest", history_id: "h1", data: [0, 1, 2, 3, 4].map(dataset), pagination: { offset: 0, returned: 5, has_more: true, next_offset: 5 } };
+    const ui = mount(first, { reply: () => ({ structuredContent: { ...first, data: [dataset(4), collection, dataset(5)], pagination: { offset: 5, returned: 3, has_more: false } } }) });
+    await flush();
+    await ui.node("show-more").click();
+    expect(ui.node("histories").children).toHaveLength(7);
+    expect(ui.node("histories").textContent).toContain("Paired reads");
+    expect(ui.node("histories").textContent.match(/Result 4/g)).toHaveLength(1);
+  });
+
   it("navigates a history, appends a remote page, and ignores host replay during browsing", async () => {
     const ui = mount(historyResult, { reply: rpc => {
       const offset = Number(rpc.params?.arguments?.offset);
@@ -851,7 +865,7 @@ describe("history result browser", () => {
     expect(ui.calls.at(-1)?.method).toBe("ui/notifications/size-changed");
     await ui.node("show-more").click();
     expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params?.arguments)).toEqual([
-      { historyId: "private-history", limit: 5, offset: 0 }, { historyId: "private-history", limit: 5, offset: 5 },
+      { historyId: "private-history", order: "newest", limit: 5, offset: 0 }, { historyId: "private-history", order: "newest", limit: 5, offset: 5 },
     ]);
     expect(ui.node("histories").children).toHaveLength(6);
     expect(ui.node("show-more").hidden).toBe(true);
@@ -1182,7 +1196,7 @@ describe("run status card", () => {
     expect(ui.node("run-results-note").textContent).toContain("other runs");
     expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params)).toEqual([
       { name: "get_run_status", arguments: { kind: "tool", runId: "private-run" } },
-      { name: "get_history_contents", arguments: { historyId: "private-history", limit: 5, offset: 0 } },
+      { name: "get_history_contents", arguments: { historyId: "private-history", order: "newest", limit: 5, offset: 0 } },
       { name: "read_dataset_report", arguments: { datasetId: "private-dataset-0", page: 1, offset: 0, includeImage: true } },
     ]);
   });

@@ -79,6 +79,13 @@ it.each(["https://usegalaxy.org", "https://usegalaxy.eu", "https://galaxy.exampl
     expect(queries[0]?.get("limit")).toBe("6");
     expect(queries[0]?.get("v")).toBe("dev");
     expect(queries[0]?.get("order")).toBe("hid-asc");
+    // Without filters the listing is the one Galaxy's history panel shows: nothing hidden, nothing deleted.
+    expect(queries[0]?.getAll("q")).toEqual(["deleted", "visible"]);
+    expect(queries[0]?.getAll("qv")).toEqual(["false", "true"]);
+    expect(first.structuredContent).toMatchObject({
+      order: "oldest", filters: { deleted: false, visible: true },
+      message: "5 visible, non-deleted items returned, oldest first. This is a history page, not the whole history. Listing an item does not open its report.",
+    });
     const second = await client.callTool({ name: "get_history_contents", arguments: { historyId: "h1", offset: 20, deleted: false, visible: true } });
     expect(second.structuredContent).toMatchObject({
       success: true, data: rows.slice(20),
@@ -87,9 +94,21 @@ it.each(["https://usegalaxy.org", "https://usegalaxy.eu", "https://galaxy.exampl
     expect(second.structuredContent).not.toHaveProperty("pagination.next_offset");
     expect(queries[1]?.getAll("q")).toEqual(["deleted", "visible"]);
     expect(queries[1]?.getAll("qv")).toEqual(["false", "true"]);
+    const hidden = await client.callTool({ name: "get_history_contents", arguments: { historyId: "h1", limit: 100, visible: false, order: "newest" } });
+    expect(queries[2]?.get("order")).toBe("hid-dsc");
+    expect(queries[2]?.getAll("qv")).toEqual(["false", "false"]);
+    expect(hidden.structuredContent).toMatchObject({
+      order: "newest", filters: { deleted: false, visible: false },
+      message: "25 hidden, non-deleted items returned, newest first. These are all hidden, non-deleted items of the history. Listing an item does not open its report.",
+    });
+    // The card lists a history as Galaxy's panel does, newest first.
+    const card = await client.callTool({ name: "show_history", arguments: { historyId: "h1" } });
+    expect(queries[3]?.get("order")).toBe("hid-dsc");
+    expect(queries[3]?.getAll("qv")).toEqual(["false", "true"]);
+    expect(card.structuredContent).toMatchObject({ order: "newest", pagination: { returned: 5, has_more: true } });
     const invalid = await client.callTool({ name: "get_history_contents", arguments: { historyId: "h1", limit: 101 } });
     expect(invalid.isError).toBe(true);
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(4);
     const failed = await client.callTool({ name: "get_history_contents", arguments: { historyId: "unavailable" } });
     expect(failed).toMatchObject({ isError: true, structuredContent: { success: false } });
     const failedOverview = await client.callTool({ name: "get_histories", arguments: {} });
@@ -145,7 +164,8 @@ it("finds generic reports beyond page one with compact candidates, bounded looku
     const tail = await client.callTool({ name: "get_history_contents", arguments: { historyId: "large", query: "absent", offset: 500 } });
     expect(tail.structuredContent).toMatchObject({ data: [], search: { scanned: 150, complete: false }, pagination: { has_more: false } });
     const noMatches = await client.callTool({ name: "get_history_contents", arguments: { historyId: "small", query: "absent" } });
-    expect(noMatches.structuredContent).toMatchObject({ data: [], search: { complete: true }, pagination: { has_more: false } });
+    expect(noMatches.structuredContent).toMatchObject({ data: [], search: { complete: true }, pagination: { has_more: false },
+      message: "0 matches in 180 inspected visible, non-deleted items. All visible, non-deleted items of the history were searched. Multiple matches are candidates, not an automatic selection." });
     const first = await client.callTool({ name: "get_history_contents", arguments: { historyId: "small", query: "analysis", limit: 1 } });
     expect(first.structuredContent).toMatchObject({ data: [{ id: "d140" }], pagination: { next_offset: 141 }, search: { complete: false } });
     const next = await client.callTool({ name: "get_history_contents", arguments: { historyId: "small", query: "analysis", limit: 1, offset: 141 } });

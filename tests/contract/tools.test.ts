@@ -97,7 +97,10 @@ describe("Galaxy tool contract", () => {
         history_id: { type: "string", description: "Same as historyId" },
       },
     });
-    for (const name of ["get_history_contents", "show_history"]) {
+    for (const [name, order] of [["get_history_contents", "oldest"], ["show_history", "newest"]]) {
+      expect(tools.find(tool => tool.name === name)?.inputSchema).toMatchObject({
+        properties: { order: { enum: ["oldest", "newest"], default: order }, deleted: { default: false }, visible: { default: true } },
+      });
       expect(tools.find(tool => tool.name === name)?.outputSchema).toMatchObject({
         properties: {
           data: { type: "array", items: { required: ["id", "name", "state"], properties: { extension: { description: "Datasets only; collections have no format" } } } },
