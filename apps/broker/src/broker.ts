@@ -321,7 +321,9 @@ export async function createBroker(config: BrokerConfig) {
             <form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button class="secondary">Remove site</button></form></li>`;
         }));
         const token = await actionToken({ accountId, sourceGrant, operation: "revoke", targetGrant: credential.grantId });
-        card = `<section><h2>${escape(clientNames.get(credential.clientId) || credential.clientId)}</h2><p>Can browse Galaxy data and run analyses. Expires ${escape(new Date(credential.expiresAt).toISOString())}.</p><ul>${sites.join("")}</ul>
+        // As on the consent page: a Claude metadata URL is shown as its trusted origin.
+        const clientLabel = clientNames.get(credential.clientId) || (isClaudeMetadataUrl(credential.clientId) ? "claude.ai" : credential.clientId);
+        card = `<section><h2>${escape(clientLabel)}</h2><p>Can browse Galaxy data and run analyses. Expires ${escape(new Date(credential.expiresAt).toISOString())}.</p><ul>${sites.join("")}</ul>
           <form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button class="danger">Disconnect this client</button></form></section>`;
       }
       ctx.set("Referrer-Policy", "same-origin");

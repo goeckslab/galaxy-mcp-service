@@ -310,6 +310,15 @@ describe("durable Galaxy credential broker", () => {
       expect(refreshed.status).toBe(200);
       expect(rotated.refresh_token).not.toBe(body.refresh_token);
       expect(await (await introspect(rotated.access_token)).json()).toMatchObject({ active: true, client_id: clientId });
+      const link = await (await managementLink(rotated.access_token)).json() as { url: string };
+      const browser = new Browser();
+      const ticket = /name="ticket" value="([^"]+)"/.exec(await (await browser.request(link.url)).text())?.[1];
+      const managed = await (await browser.request(`${config.issuer}/connections/start`, {
+        method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ ticket: ticket! }),
+      })).text();
+      expect(managed).toContain("<h2>claude.ai</h2>");
+      expect(managed).not.toContain(clientId);
       expect((await tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: rotated.refresh_token, resource })).status).toBe(400);
 
       for (const overrides of [{ redirect_uri: "https://attacker.example/callback" }, { code_challenge_method: "plain" }]) {
