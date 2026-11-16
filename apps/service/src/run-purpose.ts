@@ -32,22 +32,29 @@ const pause = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, 
 /**
  * Annotate the outputs of an accepted tool request with its purpose. Waits briefly for Galaxy to
  * create them and gives up quietly: the analysis itself is never delayed further, retried or
- * failed because of the note. Returns how many outputs were annotated. A collection counts only
- * when Galaxy reports the annotation back: older Galaxy servers accept the update and drop it.
+ * failed because of the note. Returns how many outputs were annotated, or null when Galaxy had
+ * not created them in time. A collection counts only when Galaxy reports the annotation back:
+ * older Galaxy servers accept the update and drop it.
+ *
+ * Galaxy's tool request holds the tool inputs, not the history, so the history comes from the
+ * caller, or from the first job when the caller has none.
  */
-export async function recordRunPurpose(text: string, toolRequestId: string, ctx: GalaxyContext, waitMs = WAIT_MS): Promise<number> {
+export async function recordRunPurpose(text: string, toolRequestId: string, history: string | undefined, ctx: GalaxyContext, waitMs = WAIT_MS): Promise<number | null> {
   try {
     const deadline = Date.now() + waitMs;
     for (;;) {
       const state = await ctx.client.GET("/api/tool_requests/{id}/state", { params: { path: { id: toolRequestId } } });
       if (state.error || state.data == null) return 0;
       if (String(state.data) !== "new") break;
-      if (Date.now() + POLL_MS > deadline) return 0;
+      if (Date.now() + POLL_MS > deadline) return null;
       await pause(POLL_MS, ctx.signal);
     }
     const detail = await ctx.client.GET("/api/tool_requests/{id}", { params: { path: { id: toolRequestId } } });
-    const historyId = (detail.data?.request as { history_id?: unknown } | undefined)?.history_id;
-    if (detail.error || !detail.data || typeof historyId !== "string") return 0;
+    if (detail.error || !detail.data) return 0;
+    const firstJob = detail.data.jobs[0]?.id;
+    const historyId = history ?? (firstJob === undefined ? undefined
+      : (await ctx.client.GET("/api/jobs/{job_id}", { params: { path: { job_id: firstJob } } })).data?.history_id);
+    if (typeof historyId !== "string") return 0;
     const datasets = new Set<string>();
     const collections = new Set(detail.data.implicit_collections.map(collection => collection.id));
     for (const { id } of detail.data.jobs.slice(0, MAX_JOBS)) {

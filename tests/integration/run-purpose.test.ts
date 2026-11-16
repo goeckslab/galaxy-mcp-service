@@ -25,11 +25,13 @@ function galaxy(options: { states?: string[]; jobs?: number; refuseAnnotation?: 
       return Response.json({ id: "h9" });
     }
     if (path === "/api/tool_requests/r1/state") return Response.json(states.length > 1 ? states.shift() : states[0]);
+    // As Galaxy answers: `request` is the tool's inputs. It names neither the history nor the tool.
     if (path === "/api/tool_requests/r1") return Response.json({
-      id: "r1", state: "submitted", request: { history_id: "h1", tool_id: "fastqc" },
+      id: "r1", state: "submitted", request: { input: { src: "hda", id: "d1" }, lineNum: 5 },
       jobs: Array.from({ length: options.jobs ?? 1 }, (_, index) => ({ id: `j${index}`, src: "job" })),
       implicit_collections: (options.jobs ?? 1) > 1 ? [{ id: "c1", src: "hdca", output_name: "html_file" }] : [],
     });
+    if (path === "/api/jobs/j0") return Response.json({ id: "j0", history_id: "h1", state: "new" });
     const job = /^\/api\/jobs\/(j\d+)\/outputs$/.exec(path)?.[1];
     if (job) return Response.json([
       { name: "html_file", dataset: { id: `${job}-html`, src: "hda" } },
@@ -136,11 +138,11 @@ it("does not count a collection whose annotation an older Galaxy drops", async (
 it("waits for Galaxy to create the outputs, and still accepts the run when the note cannot be saved", async () => {
   const context = (fake: ReturnType<typeof galaxy>) => createRequestGalaxyContext({ baseUrl, apiKey: "purpose-test-key", fetchImpl: fake.fetchImpl }, new AbortController().signal);
   const slow = galaxy({ states: ["new", "new", "submitted"] });
-  expect(await recordRunPurpose("Late outputs", "r1", context(slow), 5_000)).toBe(3);
+  expect(await recordRunPurpose("Late outputs", "r1", "h1", context(slow), 5_000)).toBe(3);
   expect(slow.requests.filter(request => request.endsWith("/state"))).toHaveLength(3);
 
   const never = galaxy({ states: ["new"] });
-  expect(await recordRunPurpose("Never created", "r1", context(never), 600)).toBe(0);
+  expect(await recordRunPurpose("Never created", "r1", "h1", context(never), 600)).toBeNull();
   expect(never.annotations.size).toBe(0);
   expect(never.requests.every(request => request.endsWith("/state"))).toBe(true);
 
@@ -150,10 +152,16 @@ it("waits for Galaxy to create the outputs, and still accepts the run when the n
     return new URL(request.url).pathname === "/api/tool_requests/r1" ? Response.json({ err_msg: "Unavailable" }, { status: 503 }) : failed.fetchImpl(input, init);
   } }, { purpose: "Unlucky" });
   expect(result).toMatchObject({ structuredContent: { success: true, purpose_recorded: false, data: { toolRequestId: "r1" },
-    message: "Tool request r1 accepted; execution is not yet complete. Galaxy had not created the outputs yet, so the purpose was not saved." } });
+    message: "Tool request r1 accepted; execution is not yet complete. The purpose could not be saved on the outputs." } });
   expect(result.isError).toBeUndefined();
 
   // One dataset is refused; the other dataset and the collection are still annotated.
   const partly = galaxy({ refuseAnnotation: "j0-text" });
-  expect(await recordRunPurpose("Partly", "r1", context(partly), 1_000)).toBe(2);
+  expect(await recordRunPurpose("Partly", "r1", "h1", context(partly), 1_000)).toBe(2);
+
+  // Without a history from the caller, the first job names it.
+  const unnamed = galaxy();
+  expect(await recordRunPurpose("History from the job", "r1", undefined, context(unnamed), 1_000)).toBe(3);
+  expect(unnamed.requests).toContain("GET /api/jobs/j0");
+  expect(unnamed.requests).toContain("PUT /api/histories/h1/contents/datasets/j0-html");
 });

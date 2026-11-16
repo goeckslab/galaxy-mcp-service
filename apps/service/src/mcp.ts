@@ -481,11 +481,12 @@ async function runGalaxyOperation(
     const { purpose, ...run } = args;
     const galaxy = context(connection, signal);
     const submitted = await runWithEnvelope(operation, run, galaxy);
-    const toolRequestId = (submitted.data as { toolRequestId?: unknown } | undefined)?.toolRequestId;
+    const { toolRequestId, historyId } = (submitted.data ?? {}) as { toolRequestId?: unknown; historyId?: unknown };
     if (!submitted.success || typeof toolRequestId !== "string") return structured(submitted);
-    const annotated = await recordRunPurpose(purpose, toolRequestId, galaxy);
-    return structured({ ...submitted, purpose_recorded: annotated > 0,
-      message: `${submitted.message ?? ""} ${annotated ? `Purpose saved on ${annotated} output(s).` : "Galaxy had not created the outputs yet, so the purpose was not saved."}`.trim() });
+    const annotated = await recordRunPurpose(purpose, toolRequestId, typeof historyId === "string" ? historyId : undefined, galaxy);
+    const outcome = annotated ? `Purpose saved on ${annotated} output(s).`
+      : annotated === null ? "Galaxy had not created the outputs yet, so the purpose was not saved." : "The purpose could not be saved on the outputs.";
+    return structured({ ...submitted, purpose_recorded: Boolean(annotated), message: `${submitted.message ?? ""} ${outcome}`.trim() });
   }
   if (operation.name === "create_history" && typeof args.purpose === "string") {
     const { purpose, ...history } = args;
