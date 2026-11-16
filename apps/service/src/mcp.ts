@@ -18,6 +18,9 @@ import { HISTORY_SUMMARY_URI, registerHistorySummaryResource } from "./history-s
 import { authenticatedGalaxies, connectionSource, createRequestGalaxyContext, galaxySource, instanceInput, sourceOutput, withGalaxy, type GalaxyConnection } from "./galaxy-connection.js";
 import { readRunStatus } from "./run-status.js";
 import { registerReportReader } from "./report-reader.js";
+import { registerCollections } from "./collections.js";
+import { registerLocalUpload } from "./local-upload.js";
+import { historyPurposeInput, recordHistoryPurpose, recordRunPurpose, runPurposeInput } from "./run-purpose.js";
 import { registerRunEvents } from "./events.js";
 import type { EventRequest } from "@galaxy-mcp-service/protocol";
 
@@ -474,6 +477,26 @@ async function runGalaxyOperation(
     });
   }
   if (operation.name === "get_history_contents") return runHistoryContents(args, connection, signal);
+  if (operation.name === "run_tool" && typeof args.purpose === "string") {
+    const { purpose, ...run } = args;
+    const galaxy = context(connection, signal);
+    const submitted = await runWithEnvelope(operation, run, galaxy);
+    const toolRequestId = (submitted.data as { toolRequestId?: unknown } | undefined)?.toolRequestId;
+    if (!submitted.success || typeof toolRequestId !== "string") return structured(submitted);
+    const annotated = await recordRunPurpose(purpose, toolRequestId, galaxy);
+    return structured({ ...submitted, purpose_recorded: annotated > 0,
+      message: `${submitted.message ?? ""} ${annotated ? `Purpose saved on ${annotated} output(s).` : "Galaxy had not created the outputs yet, so the purpose was not saved."}`.trim() });
+  }
+  if (operation.name === "create_history" && typeof args.purpose === "string") {
+    const { purpose, ...history } = args;
+    const galaxy = context(connection, signal);
+    const created = await runWithEnvelope(operation, history, galaxy);
+    const historyId = (created.data as { id?: unknown } | undefined)?.id;
+    if (!created.success || typeof historyId !== "string") return structured(created);
+    const recorded = await recordHistoryPurpose(purpose, historyId, galaxy);
+    return structured({ ...created, purpose_recorded: recorded,
+      message: `${created.message ?? ""} ${recorded ? "Purpose saved as the history's annotation." : "The purpose could not be saved."}`.trim() });
+  }
   const result = await runWithEnvelope(operation, args, context(connection, signal));
   if (operation.name === "get_history_details") {
     if (!result.success) return toolError(result.message ?? "Galaxy did not return history details.");
@@ -508,6 +531,10 @@ function operationInputSchema(operation: AnyOperation) {
     input.limit = z.number().int().min(1).max(50).default(20).describe("Maximum matches to return");
   } else if (operation.name === "list_workflows") {
     input.limit = z.number().int().min(1).max(100).default(50).describe("Maximum workflows to return");
+  } else if (operation.name === "run_tool") {
+    input.purpose = runPurposeInput;
+  } else if (operation.name === "create_history") {
+    input.purpose = historyPurposeInput;
   } else if (operation.name === "upload_file_from_url") {
     input.url = z
       .string()
@@ -585,7 +612,9 @@ function registerGalaxyOperation(server: McpServer, operation: AnyOperation, con
         ? (rendersHistoryContents ? "Show one interactive history card for user browsing; prefer this over separate cards for each dataset. " : "Read history data without creating a card. Use for intermediate lookups and report discovery; show_history is the separate presentation action. ") + "Return compact dataset/collection summaries or find candidates by name/format. Filtered lookup inspects at most 500 items per call; continue from pagination.next_offset with the same filters. A partial or empty page does not prove absence or uniqueness. Use show_dataset only when a standalone report card is needed."
         : operation.name === "get_dataset_details"
           ? "Read a known dataset's metadata and Galaxy-generated peek summary when available. Useful for binary, oversized or specialized datatypes. This is not full-file evidence; use read_dataset_report for supported content or open the original in Galaxy."
-          : operation.summary,
+          : name === "run_tool" ? `${operation.summary} Give purpose, a few words on why, so the reason is saved on the outputs.`
+            : name === "create_history" ? `${operation.summary} Give purpose, a few words on why, so the reason is saved as its annotation.`
+            : operation.summary,
       inputSchema: operationInputSchema(operation).extend(instanceInput),
       outputSchema: (operation.name === "get_history_details" ? historyDetailsOutput
         : operation.name === "get_history_contents" ? historyContentsOutput : operationOutput).extend(sourceOutput),
@@ -630,7 +659,7 @@ export function createGalaxyMcpHandler(
       });
       acceptSnakeCaseNames(server);
 
-      registerHistorySummaryResource(server, uiDomain, authOrigin);
+      registerHistorySummaryResource(server, uiDomain, authOrigin, [...new Set(connections.map(connection => new URL(connection.baseUrl).origin))]);
       server.registerTool("get_galaxy_connections", {
         title: "Connected Galaxy sites",
         description: "List only the Galaxy instances authorized for this connection, with their routing aliases and URLs; no credentials. Select an instance explicitly on every call when more than one is connected. Histories and identifiers belong to their source site; this does not transfer data between sites.",
@@ -789,6 +818,8 @@ export function createGalaxyMcpHandler(
         ({ instance, datasetId }, ctx) => withGalaxy(instance, connections, connection => runDatasetHtml(datasetId, connection, ctx.mcpReq.signal)),
       );
       registerReportReader(server, connections);
+      registerCollections(server, connections);
+      registerLocalUpload(server, connections);
       if (authInfo !== undefined && eventRequest !== undefined && connections.length) registerRunEvents(server, authInfo, connections, eventRequest);
       return server;
     },

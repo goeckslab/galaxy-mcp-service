@@ -60,6 +60,9 @@ interface Rpc {
   params?: { name?: string; arguments?: Record<string, unknown>; [key: string]: unknown };
 }
 
+/** What the card passes to fetch for an upload request. */
+interface FetchInit { method: string; headers: Record<string, string>; body: { bytes: number }; credentials: string; signal: AbortSignal }
+
 const resources = new Map<string, string>();
 registerHistorySummaryResource({
   registerResource(_name: string, uri: string, _metadata: unknown, read: (uri: URL) => { contents: { text: string }[] }) {
@@ -69,7 +72,7 @@ registerHistorySummaryResource({
 const html = resources.get(HISTORY_SUMMARY_URI)!;
 const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1]!;
 
-function mount(initial?: unknown, options: { initialize?: boolean; initializeResult?: unknown; standardHost?: boolean; intersectionObserver?: boolean; reply?: (rpc: Rpc) => unknown; elements?: Element[]; htmlText?: string } = {}) {
+function mount(initial?: unknown, options: { initialize?: boolean; initializeResult?: unknown; standardHost?: boolean; intersectionObserver?: boolean; reply?: (rpc: Rpc) => unknown; elements?: Element[]; htmlText?: string; fetch?: (url: string, init: FetchInit) => unknown } = {}) {
   const nodes = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1]!, new Element("DIV")]));
   const root = new Element("HTML");
   const head = new Element("HEAD");
@@ -98,7 +101,7 @@ function mount(initial?: unknown, options: { initialize?: boolean; initializeRes
     addEventListener: (name: string, callback: (event: unknown) => void) => documentListeners.set(name, callback),
   };
   const context = createContext({
-    URL,
+    URL, AbortController, ...(options.fetch && { fetch: options.fetch }),
     window: { parent, ...(options.standardHost ? {} : { openai: { toolOutput: initial, theme: "light" } }) },
     document,
     addEventListener: (name: string, callback: (event: unknown) => void) => listeners.set(name, callback),
@@ -125,6 +128,12 @@ function mount(initial?: unknown, options: { initialize?: boolean; initializeRes
     node: (id: string) => nodes.get(id)!, root, head, calls, timers, reply,
     reject: (rpc: Rpc, error: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", id: rpc.id, error } }),
     pending: () => runInContext("pending.size", context) as number,
+    /** A network failure as the page's own script sees it. */
+    networkError: () => runInContext('new TypeError("Failed to fetch")', context) as Error,
+    choose: (file: unknown) => {
+      Object.assign(nodes.get("upload-input")!, { files: [file] });
+      return nodes.get("upload-input")!.listeners.get("change")?.({ preventDefault() {} });
+    },
     notify: (value: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: value } } }),
     hostContext: (value: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: value } }),
     teardown: (id = 1000000) => emit("message", { source: parent, data: { jsonrpc: "2.0", id, method: "ui/resource-teardown", params: {} } }),
@@ -519,6 +528,123 @@ describe("history result browser", () => {
     const unnamed = mount({ success: true, data: items(1), history_id: "h1" });
     await flush();
     expect(unnamed.node("title").textContent).toBe("History contents");
+  });
+
+  describe("uploading a local file", () => {
+    const galaxy = { instance: "us", url: "https://usegalaxy.example" };
+    const history = { success: true, data: items(1), history_id: "h1", history_name: "RNA-seq", galaxy };
+    const upload = { url: "https://usegalaxy.example/api/upload/resumable_upload/0123456789abcdef", session_id: "0123456789abcdef", chunk_bytes: 10 };
+    const file = (size: number) => ({ name: "counts.tsv", size, slice: (start: number, end: number) => ({ bytes: Math.min(size, end) - start }) });
+    const tools = (ui: ReturnType<typeof mount>) => ui.calls.filter(call => call.method === "tools/call").map(call => [call.params?.name, call.params?.arguments]);
+    const reply = (started: unknown = { success: true, galaxy, upload }) => (rpc: Rpc) => ({ structuredContent:
+      rpc.params?.name === "start_file_upload" ? started
+        : rpc.params?.name === "finish_file_upload" ? { success: true, galaxy, data: { outputs: [{ id: "d9" }], jobs: [{ id: "j9" }] } }
+          : { ...history, data: items(2) } });
+    const settle = async () => { for (let turn = 0; turn < 12; turn++) await flush(); };
+
+    it("offers the upload only for a whole history bound to its site", async () => {
+      const fetch = async () => undefined;
+      const whole = mount(history, { fetch });
+      await flush();
+      expect(whole.node("upload-panel").hidden).toBe(false);
+      for (const view of [{ ...history, galaxy: undefined }, { ...history, search: { complete: true } }, { ...history, view: "dataset" }, historyResult]) {
+        const ui = mount(view, { fetch });
+        await flush();
+        expect(ui.node("upload-panel").hidden).toBe(true);
+      }
+      // A page that cannot make requests itself has nothing to offer.
+      const noFetch = mount(history);
+      await flush();
+      expect(noFetch.node("upload-panel").hidden).toBe(true);
+    });
+
+    it("sends the bytes in order straight to Galaxy without credentials, then adds the file and reloads the history", async () => {
+      const sent: Array<Record<string, unknown>> = [];
+      const ui = mount(history, { reply: reply(), fetch: async (url, init) => {
+        sent.push({ url, method: init.method, offset: init.headers["Upload-Offset"], bytes: init.body.bytes, credentials: init.credentials, type: init.headers["Content-Type"] });
+        // The second reply reports its offset; the others leave the card to count.
+        return { status: 204, ok: true, headers: { get: () => sent.length === 2 ? "20" : null } };
+      } });
+      await flush();
+      await ui.choose(file(25));
+      await settle();
+      expect(sent).toEqual([0, 10, 20].map(offset => ({
+        url: upload.url, method: "PATCH", offset: String(offset), bytes: offset === 20 ? 5 : 10, credentials: "omit", type: "application/offset+octet-stream",
+      })));
+      expect(tools(ui)).toEqual([
+        ["start_file_upload", { historyId: "h1", fileName: "counts.tsv", size: 25, instance: "us" }],
+        ["finish_file_upload", { historyId: "h1", fileName: "counts.tsv", sessionId: "0123456789abcdef", instance: "us" }],
+        ["get_history_contents", { historyId: "h1", limit: 5, offset: 0, instance: "us" }],
+      ]);
+      expect(ui.node("upload-note").textContent).toContain("counts.tsv is in Galaxy");
+      expect(ui.node("upload-note").hidden).toBe(false);
+      expect(ui.node("histories").children).toHaveLength(2);
+      expect(ui.node("upload-button").disabled).toBe(false);
+      expect(ui.node("upload-cancel").hidden).toBe(true);
+      expect(JSON.stringify(ui.calls)).not.toMatch(/api.?key|password|token/i);
+    });
+
+    it("resumes from what Galaxy has after an interruption", async () => {
+      const sent: string[] = [];
+      const ui = mount(history, { reply: reply(), fetch: async (_url, init) => {
+        sent.push(init.method === "HEAD" ? "HEAD" : `PATCH ${init.headers["Upload-Offset"]}`);
+        if (sent.length === 2) throw ui.networkError();
+        return { status: init.method === "HEAD" ? 200 : 204, ok: true, headers: { get: () => init.method === "HEAD" ? "15" : null } };
+      } });
+      await flush();
+      await ui.choose(file(25));
+      await settle();
+      expect(sent).toEqual(["PATCH 0", "PATCH 10", "HEAD", "PATCH 15"]);
+      expect(tools(ui).map(([name]) => name)).toEqual(["start_file_upload", "finish_file_upload", "get_history_contents"]);
+    });
+
+    it("adds nothing when the host blocks Galaxy, Galaxy refuses, the address is elsewhere, or the file is empty", async () => {
+      const blocked = mount(history, { reply: reply(), fetch: async () => { throw blocked.networkError(); } });
+      const refused = mount(history, { reply: reply(), fetch: async () => ({ status: 403, ok: false, headers: { get: () => null } }) });
+      const elsewhere = mount(history, { reply: reply({ success: true, galaxy, upload: { ...upload, url: "https://attacker.example/api/upload/resumable_upload/0123456789abcdef" } }),
+        fetch: async () => { throw new Error("must not be contacted"); } });
+      const empty = mount(history, { reply: reply(), fetch: async () => { throw new Error("must not be contacted"); } });
+      for (const [ui, size, text] of [
+        [blocked, 25, "did not let the card reach Galaxy"], [refused, 25, "Galaxy refused the upload (HTTP 403). Nothing was added"],
+        [elsewhere, 25, "another site. Nothing was added"], [empty, 0, "This file is empty"],
+      ] as const) {
+        await flush();
+        await ui.choose(file(size));
+        await settle();
+        expect(ui.node("upload-note").textContent).toContain(text);
+        expect(tools(ui).map(([name]) => name)).not.toContain("finish_file_upload");
+        expect(ui.node("upload-button").disabled).toBe(false);
+      }
+      expect(tools(empty)).toEqual([]);
+    });
+
+    it("reports an unanswered start as one clear sentence", async () => {
+      const ui = mount(history, { fetch: async () => { throw new Error("must not be contacted"); } });
+      await flush();
+      void ui.choose(file(25));
+      await settle();
+      ui.expire(45000);
+      await settle();
+      expect(ui.node("upload-note").textContent).toBe("Galaxy view request timed out. Nothing was added to the history.");
+      expect(ui.node("upload-button").disabled).toBe(false);
+    });
+
+    it("stops sending when cancelled", async () => {
+      const sent: string[] = [];
+      const ui = mount(history, { reply: reply(), fetch: (_url, init) => {
+        sent.push(init.headers["Upload-Offset"] ?? "");
+        return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(ui.networkError())));
+      } });
+      await flush();
+      void ui.choose(file(25));
+      await settle();
+      expect(ui.node("upload-cancel").hidden).toBe(false);
+      await ui.node("upload-cancel").click();
+      await settle();
+      expect(sent).toEqual(["0"]);
+      expect(ui.node("upload-note").textContent).toBe("Upload cancelled. Nothing was added to the history.");
+      expect(tools(ui).map(([name]) => name)).toEqual(["start_file_upload"]);
+    });
   });
 
   it.each([undefined, "javascript:alert(1)", "https://key:secret@example.test/histories/view?id=h1", "https://example.test/histories/view?id=other"])("does not expose a missing, unsafe or mismatched history link: %s", async history_url => {

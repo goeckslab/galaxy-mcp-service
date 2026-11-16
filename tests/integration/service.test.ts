@@ -291,8 +291,11 @@ describe("HTTP MCP service", () => {
       card.headers.set("mcp-name", HISTORY_SUMMARY_URI);
       const read = await (await fetch(`${configured.baseUrl}/mcp`, {
         method: "POST", headers: card.headers, body: JSON.stringify(card.body),
-      })).json() as { result: { contents: Array<{ text: string; _meta: Record<string, { redirect_domains?: string[] }> }> } };
+      })).json() as { result: { contents: Array<{ text: string; _meta: Record<string, { redirect_domains?: string[]; connect_domains?: string[]; csp?: { connectDomains: string[] } }> }> } };
       expect(read.result.contents[0]!._meta["openai/widgetCSP"]!.redirect_domains).toEqual([issuer]);
+      // The card may contact only this user's Galaxy sites, for its direct file upload.
+      expect(read.result.contents[0]!._meta["openai/widgetCSP"]!.connect_domains).toEqual(["https://us.example.test"]);
+      expect(read.result.contents[0]!._meta.ui!.csp!.connectDomains).toEqual(["https://us.example.test"]);
       expect(read.result.contents[0]!.text).toContain(`const managementOrigin = "${issuer}";`);
       expect([...previousLogs, ...configured.logs].join("\n")).not.toMatch(
         /key-us|key-eu|integration-broker-secret|token-us|token-eu|renewed-us/,
@@ -327,6 +330,9 @@ describe("HTTP MCP service", () => {
       "get_dataset_text",
       "get_dataset_html",
       "read_dataset_report",
+      "create_collection",
+      "start_file_upload",
+      "finish_file_upload",
     ]);
     const unconfigured = await client.callTool({ name: "search_tools_by_name", arguments: { query: "fastqc" } });
     expect(unconfigured.structuredContent).toMatchObject({ success: false, errorKind: "connection" });
@@ -552,6 +558,12 @@ describe("HTTP MCP service", () => {
           if (request.method === "POST" && url.pathname === "/api/tools") {
             return Response.json({ outputs: [{ id: "d2", name: "reads.fastq" }], jobs: [{ id: "j1", state: "new" }] });
           }
+          if (request.method === "POST" && url.pathname === "/api/dataset_collections") {
+            const body = await request.clone().json() as { name: string; collection_type: string; history_id: string; element_identifiers: unknown[] };
+            if (body.name === "Rejected") return Response.json({ err_msg: "Dataset d9 is not in this history.", err_code: 400008 }, { status: 400 });
+            return Response.json({ id: "c1", name: body.name, collection_type: body.collection_type, history_id: body.history_id,
+              element_count: body.element_identifiers.length, hid: 3, populated_state: "ok" });
+          }
           return Response.json({ err_msg: `Unexpected ${request.method} ${url.pathname}` }, { status: 404 });
         },
       },
@@ -615,6 +627,40 @@ describe("HTTP MCP service", () => {
         arguments: { url: "https://example.test/reads.fastq", historyId: "h2", fileType: "fastqsanger" },
       });
       expect(upload.structuredContent).toMatchObject({ success: true, data: { jobs: [{ id: "j1", state: "new" }] } });
+      const samples = await client.callTool({ name: "create_collection", arguments: {
+        history_id: "h2", name: "Samples", collection_type: "list:paired",
+        elements: [{ name: "s1", forward: "d1", reverse: "d2" }, { name: "s2", forward: "d5", reverse: "d6" }],
+      } });
+      expect(samples.structuredContent).toEqual({
+        success: true, galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
+        data: { id: "c1", name: "Samples", collection_type: "list:paired", history_id: "h2", element_count: 2, hid: 3 },
+        message: "Created list:paired collection Samples. Pass it to tools and workflows as {src:'hdca',id}.",
+      });
+      expect(JSON.parse(requests.at(-1)!.body!)).toEqual({
+        history_id: "h2", name: "Samples", collection_type: "list:paired", instance_type: "history", copy_elements: true, hide_source_items: false, fields: [],
+        element_identifiers: [
+          { name: "s1", src: "new_collection", collection_type: "paired", element_identifiers: [{ name: "forward", src: "hda", id: "d1" }, { name: "reverse", src: "hda", id: "d2" }] },
+          { name: "s2", src: "new_collection", collection_type: "paired", element_identifiers: [{ name: "forward", src: "hda", id: "d5" }, { name: "reverse", src: "hda", id: "d6" }] },
+        ],
+      });
+      const rejected = await client.callTool({ name: "create_collection", arguments: {
+        historyId: "h2", name: "Rejected", collectionType: "list", elements: [{ name: "a", dataset: "d9" }],
+      } });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.structuredContent).toMatchObject({ success: false, message: "Galaxy did not create the collection: Dataset d9 is not in this history." });
+      // A request that cannot describe its collection type never reaches Galaxy.
+      const sent = requests.length;
+      for (const [collectionType, elements] of [
+        ["list", [{ name: "a", dataset: "d1" }, { name: "a", dataset: "d2" }]],
+        ["list", [{ name: "a", forward: "d1", reverse: "d2" }]],
+        ["paired", [{ forward: "d1", reverse: "d2" }, { forward: "d5", reverse: "d6" }]],
+        ["list:paired", [{ name: "s1", forward: "d1" }]],
+      ] as const) {
+        const invalid = await client.callTool({ name: "create_collection", arguments: { historyId: "h2", name: "Invalid", collectionType, elements } });
+        expect(invalid.isError).toBe(true);
+        expect((invalid.structuredContent as { message: string }).message).toMatch(/No Galaxy request was sent\.$/);
+      }
+      expect(requests).toHaveLength(sent);
       expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
         "GET /api/tools",
         "GET /api/histories/h1",
@@ -630,6 +676,8 @@ describe("HTTP MCP service", () => {
         "GET /api/datasets/d4/get_content_as_text",
         "POST /api/histories",
         "POST /api/tools",
+        "POST /api/dataset_collections",
+        "POST /api/dataset_collections",
       ]);
       expect(configured.logs.join("\n")).not.toContain(apiKey);
     } finally {

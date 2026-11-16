@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 
-export const HISTORY_SUMMARY_URI = "ui://galaxy/history-summary-v18.html";
+export const HISTORY_SUMMARY_URI = "ui://galaxy/history-summary-v19.html";
 
 const MIME_TYPE = "text/html;profile=mcp-app";
 // Embedded, unmodified Galaxy symbol by Petr Kadlec.
@@ -174,6 +174,8 @@ const HTML = `<!doctype html>
     @media (max-width: 759px) { .workspace[data-detail-open="true"][data-files-visible="true"] #dataset-detail { display: none; } }
     @media (pointer: coarse) { .workspace .close-button, .workspace .workspace-nav select { min-height: 44px; } .workspace .workspace-nav select { font-size: 1rem; } }
     @media (max-width: 520px) { body { padding: 6px; } .card { padding: 16px; border-radius: 18px; } header { gap: 10px; } li, .content-button { align-items: flex-start; } .meta { max-width: 42%; } .statistics { grid-template-columns: 1fr; } }
+    .upload-panel { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+    .upload-panel .caveat { flex-basis: 100%; margin: 0; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -207,6 +209,12 @@ const HTML = `<!doctype html>
     <h2 id="workspace-history-title" class="workspace-history-title" hidden></h2>
     <a id="history-link" class="close-button" target="_blank" rel="noopener noreferrer" title="Open this history in Galaxy (new tab)" hidden>Open history in Galaxy ↗</a>
     <p id="history-link-note" class="caveat" role="status" hidden></p>
+    <div id="upload-panel" class="upload-panel" hidden>
+      <button id="upload-button" class="close-button" type="button" title="The file goes from this device straight to Galaxy">Upload a file…</button>
+      <button id="upload-cancel" class="close-button" type="button" hidden>Cancel upload</button>
+      <input id="upload-input" type="file" hidden>
+      <p id="upload-note" class="caveat" role="status" aria-live="polite" hidden></p>
+    </div>
     <p id="message" class="message" role="status" aria-live="polite">Waiting for Galaxy…</p>
     <button id="view-reconnect" class="close-button" type="button" hidden>Reconnect view</button>
     <section id="run-panel" aria-label="Analysis run status" hidden>
@@ -277,6 +285,11 @@ const HTML = `<!doctype html>
     const historyName = document.getElementById("history-name");
     const historyLink = document.getElementById("history-link");
     const historyLinkNote = document.getElementById("history-link-note");
+    const uploadPanel = document.getElementById("upload-panel");
+    const uploadButton = document.getElementById("upload-button");
+    const uploadCancel = document.getElementById("upload-cancel");
+    const uploadInput = document.getElementById("upload-input");
+    const uploadNote = document.getElementById("upload-note");
     const showMore = document.getElementById("show-more");
     const showLess = document.getElementById("show-less");
     const datasetDetail = document.getElementById("dataset-detail");
@@ -303,6 +316,8 @@ const HTML = `<!doctype html>
     const seenViewIds = new Set();
     let sourceViewId;
     let sourceGalaxy;
+    let uploadAbort;
+    let uploadNoteHistory;
     let viewContext;
     let lastSentContext;
     let closed = false;
@@ -336,6 +351,7 @@ const HTML = `<!doctype html>
     }
 
     function setHistoryLink(data) {
+      uploadPanel.hidden = true;
       historyLink.hidden = true;
       historyLink.removeAttribute("href");
       historyLinkNote.hidden = true;
@@ -408,6 +424,90 @@ const HTML = `<!doctype html>
         }
       });
     }
+
+    function uploadStatus(text) {
+      uploadNote.textContent = text;
+      uploadNote.hidden = false;
+      sendSize();
+    }
+
+    // The bytes go from this page straight to the Galaxy site (tus). The server only opens the
+    // upload with the user's key and, once Galaxy has every byte, turns it into a dataset.
+    async function sendFile(file, upload, signal, progress) {
+      const headers = { "Tus-Resumable": "1.0.0" };
+      const options = { signal, credentials: "omit", referrerPolicy: "no-referrer" };
+      let offset = 0;
+      let failures = 0;
+      while (offset < file.size) {
+        try {
+          const response = await fetch(upload.url, { ...options, method: "PATCH", body: file.slice(offset, offset + upload.chunk),
+            headers: { ...headers, "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" } });
+          if (response.status !== 204) throw Object.assign(new Error("Galaxy refused the upload (HTTP " + response.status + ")."), { refused: response.status !== 409 && response.status < 500 });
+          const next = Number(response.headers.get("Upload-Offset"));
+          offset = Number.isSafeInteger(next) && next > offset ? next : Math.min(file.size, offset + upload.chunk);
+          failures = 0;
+          progress(offset);
+        } catch (error) {
+          // Before any byte arrived, a network error means the host does not let this page reach Galaxy.
+          if (signal.aborted || error?.refused || (offset === 0 && failures === 0 && error instanceof TypeError) || ++failures > 3) throw error;
+          const status = await fetch(upload.url, { ...options, method: "HEAD", headers });
+          const received = Number(status.headers.get("Upload-Offset"));
+          if (!status.ok || !Number.isSafeInteger(received)) throw error;
+          offset = received;
+        }
+      }
+    }
+
+    async function uploadFile(file) {
+      const history = currentHistory;
+      const source = sourceGalaxy;
+      if (uploadAbort || !toolsAvailable() || !source || !string(history?.id)) return;
+      uploadNoteHistory = string(history.id);
+      if (!file.size) { uploadStatus("This file is empty, so nothing was uploaded."); return; }
+      const abort = uploadAbort = new AbortController();
+      const name = string(file.name) || "upload";
+      const target = { historyId: string(history.id), fileName: name };
+      uploadButton.disabled = true;
+      uploadCancel.hidden = false;
+      uploadStatus("Starting the upload of " + name + "…");
+      let stage = "start";
+      try {
+        const started = await request("tools/call", { name: "start_file_upload", arguments: { ...target, size: file.size } });
+        const upload = started?.structuredContent?.upload;
+        if (started?.isError || !upload) throw new Error(string(started?.structuredContent?.message) || "Galaxy did not start the upload.");
+        const url = new URL(upload.url);
+        if (url.protocol !== "https:" || url.origin !== new URL(source.url).origin) throw new Error("Galaxy returned an upload address on another site.");
+        if (abort.signal.aborted) throw new Error("Cancelled");
+        stage = "send";
+        await sendFile(file, { url: url.href, chunk: Number.isSafeInteger(upload.chunk_bytes) && upload.chunk_bytes > 0 ? upload.chunk_bytes : 10485760 }, abort.signal,
+          sent => uploadStatus("Uploading " + name + " to Galaxy: " + Math.floor(sent / file.size * 100) + "%"));
+        stage = "finish";
+        uploadCancel.hidden = true;
+        uploadStatus("Adding " + name + " to the history…");
+        const finished = await request("tools/call", { name: "finish_file_upload", arguments: { ...target, sessionId: string(upload.session_id) } });
+        if (finished?.isError || finished?.structuredContent?.success !== true) throw new Error(string(finished?.structuredContent?.message) || "Galaxy did not add the file.");
+        uploadStatus(name + " is in Galaxy, which is now processing it. Tell the assistant when you want to use it.");
+        if (currentHistory === history && datasetDetail.hidden && !closed) void openHistory(history);
+      } catch (error) {
+        // One sentence, whether or not the reason came with its own full stop.
+        const reason = fallback => (string(error?.message).replace(/[.\\s]+$/, "") || fallback) + ".";
+        uploadStatus(abort.signal.aborted ? "Upload cancelled. Nothing was added to the history."
+          : stage === "send" && error instanceof TypeError ? "This app did not let the card reach Galaxy. Open the history in Galaxy and upload the file there."
+          : stage === "finish" ? reason("Galaxy did not confirm the file") + " Check the history in Galaxy before uploading again."
+          : reason("The upload failed") + " Nothing was added to the history.");
+      } finally {
+        uploadAbort = undefined;
+        uploadButton.disabled = false;
+        uploadCancel.hidden = true;
+      }
+    }
+    uploadButton.addEventListener("click", () => { if (!uploadAbort) uploadInput.click(); });
+    uploadCancel.addEventListener("click", () => uploadAbort?.abort());
+    uploadInput.addEventListener("change", () => {
+      const file = uploadInput.files?.[0];
+      uploadInput.value = "";
+      if (file) void uploadFile(file);
+    });
 
     let sizePending = false;
     let lastHeight;
@@ -484,6 +584,7 @@ const HTML = `<!doctype html>
     }
 
     function renderWorkspace(data) {
+      uploadPanel.hidden = true;
       sourceGalaxy = undefined;
       viewRequestId += 1;
       detailRequestId += 1;
@@ -766,6 +867,9 @@ const HTML = `<!doctype html>
       const items = success ? data.data.filter(value => value && typeof value === "object") : [];
       const rows = items.slice(0, visibleCount);
       const status = success ? "connected" : data.errorKind === "connection" ? "not_configured" : "error";
+      // A whole history bound to its site can receive a file; a search result or a single report cannot.
+      uploadPanel.hidden = !(success && !data.search && data.view !== "dataset" && string(currentHistory?.id) && sourceGalaxy && canCallTools && typeof fetch === "function");
+      if (string(currentHistory?.id) !== uploadNoteHistory) uploadNote.hidden = true;
 
       breadcrumbs.hidden = !!workspaceConnections || (!historyList && !currentRun);
       historyBack.textContent = currentRun ? "‹ Run status" : "‹ Histories";
@@ -1483,6 +1587,7 @@ const HTML = `<!doctype html>
 
     function closeView() {
       closed = true;
+      uploadAbort?.abort();
       initialized = false;
       manageConnections.disabled = true;
       clearTimeout(runTimer);
@@ -1595,21 +1700,25 @@ const HTML = `<!doctype html>
 </body>
 </html>`;
 
-/** `authOrigin` is the OAuth broker's origin, where connection-management links open. */
-export function registerHistorySummaryResource(server: McpServer, domain?: string, authOrigin?: string): void {
+/**
+ * `authOrigin` is the OAuth broker's origin, where connection-management links open.
+ * `galaxyOrigins` are the user's authorized Galaxy sites, the only hosts the card may
+ * contact itself: its Upload button sends a chosen file straight to them.
+ */
+export function registerHistorySummaryResource(server: McpServer, domain?: string, authOrigin?: string, galaxyOrigins: string[] = []): void {
   const html = HTML.replace("__MANAGEMENT_ORIGIN__", () => JSON.stringify(authOrigin ?? ""));
   const metadata = {
     // Host-specific origins are not portable. Claude uses its default isolated origin.
     ...(domain && { "openai/widgetDomain": domain }),
     "openai/widgetCSP": {
-      connect_domains: [],
+      connect_domains: galaxyOrigins,
       resource_domains: [],
       redirect_domains: authOrigin ? [authOrigin] : [],
     },
     ui: {
       prefersBorder: true,
       csp: {
-        connectDomains: [],
+        connectDomains: galaxyOrigins,
         resourceDomains: [],
       },
     },

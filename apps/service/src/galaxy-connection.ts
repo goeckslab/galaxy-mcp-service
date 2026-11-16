@@ -53,25 +53,25 @@ export async function withGalaxy(
     index === 0 && item.type === "text" ? { ...item, text: JSON.stringify(structuredContent) } : item) };
 }
 
+/** The connection's fetch with this request's cancellation, a deadline per exchange, and no redirects. */
+export function requestFetch(connection: { fetchImpl?: typeof fetch }, signal: AbortSignal): typeof fetch {
+  const fetchImpl = connection.fetchImpl ?? fetch;
+  return (input, init) => {
+    const requestSignal = AbortSignal.any([
+      signal,
+      ...(input instanceof Request ? [input.signal] : []),
+      ...(init?.signal ? [init.signal] : []),
+      // Each HTTP exchange has a deadline; a job may still be polled for longer.
+      AbortSignal.timeout(60_000),
+    ]);
+    requestSignal.throwIfAborted();
+    return fetchImpl(input, { ...init, redirect: "error", signal: requestSignal });
+  };
+}
+
 export function createRequestGalaxyContext(
   connection: { baseUrl: string; apiKey: string; fetchImpl?: typeof fetch },
   signal: AbortSignal,
 ) {
-  const fetchImpl = connection.fetchImpl ?? fetch;
-  return createGalaxyContext({
-    baseUrl: connection.baseUrl,
-    apiKey: connection.apiKey,
-    signal,
-    fetchImpl: (input, init) => {
-      const requestSignal = AbortSignal.any([
-        signal,
-        ...(input instanceof Request ? [input.signal] : []),
-        ...(init?.signal ? [init.signal] : []),
-        // Each HTTP exchange has a deadline; a job may still be polled for longer.
-        AbortSignal.timeout(60_000),
-      ]);
-      requestSignal.throwIfAborted();
-      return fetchImpl(input, { ...init, redirect: "error", signal: requestSignal });
-    },
-  });
+  return createGalaxyContext({ baseUrl: connection.baseUrl, apiKey: connection.apiKey, signal, fetchImpl: requestFetch(connection, signal) });
 }

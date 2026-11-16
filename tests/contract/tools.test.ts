@@ -44,6 +44,9 @@ describe("Galaxy tool contract", () => {
       "get_dataset_text",
       "get_dataset_html",
       "read_dataset_report",
+      "create_collection",
+      "start_file_upload",
+      "finish_file_upload",
     ]);
     expect(tools.map(({ name }) => name)).not.toContain("read_probe");
     for (const tool of tools) {
@@ -65,7 +68,7 @@ describe("Galaxy tool contract", () => {
       "invoke_workflow", "search_iwc_workflows", "recommend_iwc_workflows",
       "get_iwc_workflow_details", "import_workflow_from_iwc",
     ].sort());
-    for (const name of ["get_user", "get_histories", "get_history_contents", "show_dataset", "get_dataset_text", "get_dataset_html", "read_dataset_report", "get_run_status", "create_history", "cancel_workflow_invocation"]) {
+    for (const name of ["get_user", "get_histories", "get_history_contents", "show_dataset", "get_dataset_text", "get_dataset_html", "read_dataset_report", "get_run_status", "create_history", "create_collection", "cancel_workflow_invocation"]) {
       expect(tools.find((tool) => tool.name === name)?.annotations.openWorldHint).toBe(false);
     }
     expect(tools.find(({ name }) => name === "show_histories")).toMatchObject({
@@ -142,6 +145,12 @@ describe("Galaxy tool contract", () => {
         required: ["dataset_id", "name", "extension", "text", "characters_returned", "truncated"],
       },
     });
+    // Only the card can send a local file, so the model never sees the upload pair.
+    for (const name of ["start_file_upload", "finish_file_upload"]) {
+      expect(tools.find(tool => tool.name === name)).toMatchObject({
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, _meta: { ui: { visibility: ["app"] } },
+      });
+    }
     expect(tools.find(({ name }) => name === "get_dataset_html")).toMatchObject({
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       _meta: { ui: { visibility: ["app"] } },
