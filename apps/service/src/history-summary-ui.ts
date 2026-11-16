@@ -2,26 +2,6 @@ import type { McpServer } from "@modelcontextprotocol/server";
 
 export const HISTORY_SUMMARY_URI = "ui://galaxy/history-summary-v18.html";
 
-const LEGACY_HISTORY_SUMMARY_URIS = [
-  "ui://galaxy/history-summary-v1.html",
-  "ui://galaxy/history-summary-v2.html",
-  "ui://galaxy/history-summary-v3.html",
-  "ui://galaxy/history-summary-v4.html",
-  "ui://galaxy/history-summary-v5.html",
-  "ui://galaxy/history-summary-v6.html",
-  "ui://galaxy/history-summary-v7.html",
-  "ui://galaxy/history-summary-v8.html",
-  "ui://galaxy/history-summary-v9.html",
-  "ui://galaxy/history-summary-v10.html",
-  "ui://galaxy/history-summary-v11.html",
-  "ui://galaxy/history-summary-v12.html",
-  "ui://galaxy/history-summary-v13.html",
-  "ui://galaxy/history-summary-v14.html",
-  "ui://galaxy/history-summary-v15.html",
-  "ui://galaxy/history-summary-v16.html",
-  "ui://galaxy/history-summary-v17.html",
-] as const;
-
 const MIME_TYPE = "text/html;profile=mcp-app";
 // Embedded, unmodified Galaxy symbol by Petr Kadlec.
 // Asset and usage conditions: https://artifact.galaxyproject.org/images/galaxy-logos/
@@ -62,6 +42,10 @@ const HTML = `<!doctype html>
       box-shadow: var(--shadow);
     }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .header-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+    .workspace-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
+    .workspace-nav select { min-width: 0; max-width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 10px; color: var(--text); background: var(--surface); font: inherit; font-size: .8rem; }
+    .workspace-nav select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
     .brand-heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
     .brand-mark { display: grid; place-items: center; flex: none; width: 42px; height: 42px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
     .brand-mark img { display: block; width: 32px; height: auto; }
@@ -111,8 +95,8 @@ const HTML = `<!doctype html>
     .close-button { min-height: 32px; padding: 5px 10px; border: 0; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font: inherit; font-size: .76rem; font-weight: 650; cursor: pointer; }
     .close-button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
     .close-button:disabled { color: var(--secondary); background: var(--row); cursor: default; }
-    #history-link, #report-link { display: inline-flex; align-items: center; margin-top: 14px; text-decoration: none; }
-    #history-link:hover, #report-link:hover { text-decoration: underline; }
+    #history-link, #report-link, #management-link { display: inline-flex; align-items: center; margin-top: 14px; text-decoration: none; }
+    #history-link:hover, #report-link:hover, #management-link:hover { text-decoration: underline; }
     .run-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
     .run-actions .close-button { min-height: 38px; padding: 8px 14px; }
     .run-warning { margin-top: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--orange) 25%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--orange) 6%, transparent); color: var(--orange); font-size: .78rem; line-height: 1.45; }
@@ -151,6 +135,10 @@ const HTML = `<!doctype html>
     .report-preview :is(th,td) { padding: 8px 12px; border: 1px solid var(--line); text-align: left; white-space: nowrap; }
     .report-preview th { background: var(--row); }
     .report-preview img { max-width: none; height: auto; vertical-align: middle; background: white; }
+    .report-scroll:has(> .dataset-image) { max-height: var(--figure-height, 620px); }
+    .dataset-image { display: block; width: auto; max-width: 100%; max-height: calc(var(--figure-height, 620px) - 2px); height: auto; margin: auto; background: white; }
+    .dataset-image[data-actual="true"] { max-width: none; max-height: none; }
+    .dataset-media { display: block; width: 100%; max-height: 540px; }
     @supports not selector(::-webkit-scrollbar) {
       pre, .report-scroll { scrollbar-color: var(--scroll-thumb) var(--scroll-track); scrollbar-width: thin; }
     }
@@ -158,12 +146,39 @@ const HTML = `<!doctype html>
     pre::-webkit-scrollbar-track, .report-scroll::-webkit-scrollbar-track { background: var(--scroll-track); }
     pre::-webkit-scrollbar-thumb, .report-scroll::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: var(--scroll-thumb); background-clip: padding-box; }
     pre:focus-visible, .report-scroll:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    .workspace { border-radius: 16px; box-shadow: none; background: light-dark(#fff, #212121); }
+    .workspace header { flex-wrap: wrap; }
+    .workspace .brand-mark { width: 36px; height: 36px; border: 0; border-radius: 7px; }
+    .workspace .badge { padding: 0; background: transparent; box-shadow: none; font-weight: 500; }
+    .workspace .badge::before { box-shadow: none; }
+    .workspace .workspace-nav { padding-bottom: 16px; border-bottom: 1px solid var(--line); font-size: .8rem; }
+    .workspace .workspace-nav select { font-size: .85rem; }
+    .workspace-history-title { margin: 18px 0 0; font-size: 1.55rem; line-height: 1.3; letter-spacing: -.025em; white-space: normal; overflow-wrap: anywhere; }
+    .workspace .close-button { border-radius: 7px; background: var(--row); color: var(--text); font-weight: 500; }
+    .workspace .close-button:hover { background: var(--hover); }
+    .workspace .content-button { padding: 14px 8px; gap: 10px; border-radius: 7px; }
+    .workspace .content-button[aria-expanded="true"] { background: var(--hover); }
+    .workspace .content-button h2 { font-weight: 550; }
+    .workspace .kind { width: 32px; height: 32px; border-radius: 8px; box-shadow: none; font-weight: 600; }
+    .workspace .status { padding: 0; background: transparent; box-shadow: none; font-weight: 500; }
+    .workspace .dataset-detail { min-width: 0; margin-top: 20px; border: 0; padding-top: 0; }
+    .workspace .dataset-detail h2 { font-size: 1.25rem; font-weight: 600; line-height: 1.35; }
+    .workspace .file-list-panel { min-width: 0; }
+    @media (min-width: 760px) {
+      .workspace[data-detail-open="true"][data-files-visible="true"] .browse-body { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr); gap: 20px; }
+      .workspace[data-detail-open="true"][data-files-visible="true"] .file-list-panel { padding-right: 16px; border-right: 1px solid var(--line); }
+      .workspace[data-detail-open="true"] #histories { margin-top: 20px; }
+      .workspace[data-detail-open="true"] .file-list-panel .meta { max-width: 35%; }
+      .workspace[data-detail-open="true"] .file-list-panel .view { display: none; }
+    }
+    @media (max-width: 759px) { .workspace[data-detail-open="true"][data-files-visible="true"] #dataset-detail { display: none; } }
+    @media (pointer: coarse) { .workspace .close-button, .workspace .workspace-nav select { min-height: 44px; } .workspace .workspace-nav select { font-size: 1rem; } }
     @media (max-width: 520px) { body { padding: 6px; } .card { padding: 16px; border-radius: 18px; } header { gap: 10px; } li, .content-button { align-items: flex-start; } .meta { max-width: 42%; } .statistics { grid-template-columns: 1fr; } }
     [hidden] { display: none !important; }
   </style>
 </head>
 <body>
-  <main class="card" aria-labelledby="title">
+  <main id="galaxy-card" class="card" aria-labelledby="title" data-ui-build="workspace-layout-20261002">
     <nav id="breadcrumbs" class="breadcrumbs" aria-label="History navigation" hidden>
       <button id="history-back" class="close-button" type="button">‹ Histories</button>
       <span id="history-name"></span>
@@ -176,8 +191,20 @@ const HTML = `<!doctype html>
         <p id="instance" class="instance" hidden></p>
         </div>
       </div>
-      <span id="badge" class="badge">Waiting</span>
+      <div class="header-actions">
+        <button id="manage-connections" class="close-button" type="button" hidden>Connections</button>
+        <span id="badge" class="badge">Waiting</span>
+      </div>
     </header>
+    <a id="management-link" class="close-button" target="_blank" rel="noopener noreferrer" hidden>Open connection manager ↗</a>
+    <p id="management-note" class="caveat" role="status" aria-live="polite" hidden></p>
+    <nav id="workspace-nav" class="workspace-nav" aria-label="Galaxy workspace" hidden>
+      <label for="workspace-site">Galaxy site</label>
+      <select id="workspace-site" aria-label="Authorized Galaxy site"></select>
+      <button id="workspace-histories" class="close-button" type="button">Histories</button>
+      <button id="workspace-file-list" class="close-button" type="button" aria-controls="file-list-panel" aria-expanded="false" hidden>Show file list</button>
+    </nav>
+    <h2 id="workspace-history-title" class="workspace-history-title" hidden></h2>
     <a id="history-link" class="close-button" target="_blank" rel="noopener noreferrer" title="Open this history in Galaxy (new tab)" hidden>Open history in Galaxy ↗</a>
     <p id="history-link-note" class="caveat" role="status" hidden></p>
     <p id="message" class="message" role="status" aria-live="polite">Waiting for Galaxy…</p>
@@ -193,11 +220,14 @@ const HTML = `<!doctype html>
       </div>
       <p id="run-results-note" class="caveat">History results may include inputs and outputs from other runs.</p>
     </section>
-    <ul id="histories" aria-label="Galaxy histories" hidden></ul>
-    <div class="list-actions">
-      <button id="show-less" class="close-button more-button" type="button" aria-controls="histories" hidden>Load less</button>
-      <button id="show-more" class="close-button more-button" type="button" aria-controls="histories" hidden>Load more</button>
-    </div>
+    <div class="browse-body">
+      <section id="file-list-panel" class="file-list-panel" aria-label="Galaxy history browser">
+        <ul id="histories" aria-label="Galaxy histories" hidden></ul>
+        <div class="list-actions">
+          <button id="show-less" class="close-button more-button" type="button" aria-controls="histories" hidden>Load less</button>
+          <button id="show-more" class="close-button more-button" type="button" aria-controls="histories" hidden>Load more</button>
+        </div>
+      </section>
     <section id="dataset-detail" class="dataset-detail" aria-labelledby="detail-title" hidden>
       <div class="detail-header">
         <div>
@@ -210,11 +240,27 @@ const HTML = `<!doctype html>
       <p id="report-link-note" class="caveat" role="status" hidden></p>
       <div id="detail-body"></div>
     </section>
+    </div>
   </main>
   <script>
+    const managementOrigin = __MANAGEMENT_ORIGIN__;
     const badge = document.getElementById("badge");
     const title = document.getElementById("title");
     const instance = document.getElementById("instance");
+    const manageConnections = document.getElementById("manage-connections");
+    const managementLink = document.getElementById("management-link");
+    const managementNote = document.getElementById("management-note");
+    const workspaceNav = document.getElementById("workspace-nav");
+    const workspaceSite = document.getElementById("workspace-site");
+    const workspaceHistories = document.getElementById("workspace-histories");
+    const card = document.getElementById("galaxy-card");
+    const fileListPanel = document.getElementById("file-list-panel");
+    const workspaceFileList = document.getElementById("workspace-file-list");
+    const workspaceHistoryTitle = document.getElementById("workspace-history-title");
+    let filesVisible = false;
+    let workspaceConnections;
+    let workspaceInitial;
+    let managementAvailable = true;
     const message = document.getElementById("message");
     const viewReconnect = document.getElementById("view-reconnect");
     const runPanel = document.getElementById("run-panel");
@@ -244,8 +290,7 @@ const HTML = `<!doctype html>
     const browsingUnavailable = " This host does not support browsing from this card. Ask for a history or report in chat.";
     const string = value => typeof value === "string" ? value : "";
     const stateLabels = { ok: "Ready", new: "Preparing", upload: "Uploading", queued: "Queued", running: "Running", waiting: "Waiting", paused: "Paused", error: "Failed", failed: "Failed", discarded: "Discarded", deleted: "Deleted", empty: "Empty", setting_metadata: "Preparing metadata" };
-    const stateLabel = value => Object.hasOwn(stateLabels, string(value).toLowerCase()) ? stateLabels[string(value).toLowerCase()] : "Status unavailable";
-    const readableExtensions = new Set(["txt", "tabular", "csv", "tsv"]);
+    const stateLabel = value => Object.hasOwn(stateLabels, string(value).toLowerCase()) ? stateLabels[string(value).toLowerCase()] : "";
     const pending = new Map();
     let nextRequestId = 1;
     let detailRequestId = 0;
@@ -340,7 +385,7 @@ const HTML = `<!doctype html>
     function request(method, params, timeoutMs = 45000) {
       if (closed) return Promise.reject(new Error("Galaxy view closed"));
       if (method === "tools/call" && !toolsAvailable()) return Promise.reject(new Error("This Galaxy view cannot call tools"));
-      const expectedSource = method === "tools/call" ? sourceGalaxy : undefined;
+      const expectedSource = method === "tools/call" && params?.name !== "get_connection_management_link" ? sourceGalaxy : undefined;
       if (expectedSource) params = { ...params, arguments: { ...params.arguments, instance: expectedSource.instance } };
       const id = nextRequestId++;
       return new Promise((resolve, reject) => {
@@ -364,18 +409,72 @@ const HTML = `<!doctype html>
       });
     }
 
+    let sizePending = false;
+    let lastHeight;
+    let figureHeightLimit;
     function sendSize() {
-      if (!initialized) return;
-      requestAnimationFrame(() => post({
-        jsonrpc: "2.0",
-        method: "ui/notifications/size-changed",
-        params: { height: Math.ceil(document.documentElement.getBoundingClientRect().height) },
-      }));
+      if (!initialized || closed || sizePending) return;
+      sizePending = true;
+      requestAnimationFrame(() => {
+        sizePending = false;
+        if (!initialized || closed) return;
+        const image = detailBody.querySelector("img");
+        if (image?.className === "dataset-image") {
+          const scroller = image.parentElement;
+          const controlsHeight = document.documentElement.getBoundingClientRect().height - scroller.getBoundingClientRect().height;
+          scroller.style.setProperty("--figure-height", (figureHeightLimit === undefined ? 620 : Math.max(3, figureHeightLimit - controlsHeight)) + "px");
+        }
+        const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+        if (height === lastHeight) return;
+        lastHeight = height;
+        post({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height } });
+      });
     }
+
+    manageConnections.hidden = true;
+    manageConnections.addEventListener("click", async () => {
+      if (!toolsAvailable() || manageConnections.disabled) return;
+      manageConnections.disabled = true;
+      manageConnections.textContent = "Opening…";
+      managementLink.hidden = true;
+      managementLink.removeAttribute("href");
+      managementNote.hidden = true;
+      try {
+        const result = await request("tools/call", { name: "get_connection_management_link", arguments: {} });
+        if (result?.isError) throw new Error("Management link unavailable");
+        const url = new URL(string(result?.structuredContent?.url));
+        if (url.protocol !== "https:" || url.origin !== managementOrigin
+          || !/^\\/connections\\/[A-Za-z0-9_-]{43}$/.test(url.pathname)
+          || url.search || url.hash || url.username || url.password) throw new Error("Invalid management link");
+        managementLink.setAttribute("href", url.href);
+        if (!canOpenLinks) {
+          managementLink.hidden = false;
+          managementNote.textContent = "Your private link is ready.";
+          managementNote.hidden = false;
+        } else {
+          const opened = await request("ui/open-link", { url: url.href });
+          if (opened?.isError) throw new Error("Link was not opened");
+        }
+      } catch {
+        if (managementLink.getAttribute("href")) {
+          managementLink.hidden = false;
+          managementNote.textContent = "The host could not open this link. Open or copy it below.";
+        } else {
+          managementNote.textContent = "Connection management is unavailable here. Ask in chat to manage Galaxy connections.";
+        }
+        managementNote.hidden = false;
+      } finally {
+        manageConnections.disabled = !toolsAvailable();
+        manageConnections.textContent = "Connections";
+        sendSize();
+      }
+    });
 
     function publishView(value) {
       viewContext = { ...value, ...(sourceGalaxy && { galaxy: sourceGalaxy }), view_id: sourceViewId || null, display_verified: false,
-        scope: "This card only, not other tool calls or the user's workspace. Content loading does not verify visible display." };
+        surface: workspaceConnections ? "workspace" : "card",
+        scope: workspaceConnections ? "This open Galaxy panel only. Prefer its controls; do not create a card for each lookup. Content loading does not verify visible display."
+          : "This card only, not other tool calls or the user's workspace. Content loading does not verify visible display." };
       if (!initialized || !canUpdateContext || closed) return;
       const serialized = JSON.stringify(viewContext);
       if (serialized === lastSentContext) return;
@@ -384,12 +483,102 @@ const HTML = `<!doctype html>
       void request("ui/update-model-context", { structuredContent: viewContext }, 5000).catch(() => {});
     }
 
-    function updateListVisibility() {
-      histories.hidden = !datasetDetail.hidden || histories.childElementCount === 0;
-      message.hidden = !datasetDetail.hidden;
-      showMore.hidden = !datasetDetail.hidden || !canShowMore;
-      showLess.hidden = !datasetDetail.hidden || histories.childElementCount <= CONTENT_PAGE_SIZE;
+    function renderWorkspace(data) {
+      sourceGalaxy = undefined;
+      viewRequestId += 1;
+      detailRequestId += 1;
+      currentRun = undefined;
+      currentHistory = undefined;
+      currentContents = undefined;
+      historyList = undefined;
+      visibleCount = CONTENT_PAGE_SIZE;
+      historyVisibleCount = CONTENT_PAGE_SIZE;
+      workspaceConnections = Array.isArray(data.connections) ? data.connections.filter(value => {
+        try { const url = new URL(value.url); return string(value.instance) && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password; }
+        catch { return false; }
+      }) : [];
+      renderHistories({ status: "connected", histories: [] });
+      managementAvailable = data.management_available === true;
+      manageConnections.hidden = !managementAvailable || !canCallTools;
+      workspaceNav.hidden = false;
+      workspaceSite.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = workspaceConnections.length ? "Choose a Galaxy site" : "No authorized sites";
+      workspaceSite.append(placeholder);
+      for (const connection of workspaceConnections) {
+        const option = document.createElement("option");
+        option.value = connection.instance;
+        option.textContent = connection.instance + " · " + new URL(connection.url).host;
+        workspaceSite.append(option);
+      }
+      workspaceInitial = data.initial;
+      const selected = workspaceConnections.find(value => value.instance === data.initial?.galaxy?.instance && value.url === data.initial?.galaxy?.url);
+      workspaceSite.value = selected?.instance || "";
+      workspaceHistories.disabled = !selected || !toolsAvailable();
+      title.textContent = "Galaxy workspace";
+      message.textContent = workspaceConnections.length ? "Choose a site to browse its histories and reports. Analyses stay on their original Galaxy site." : "Connect a Galaxy account in your client to begin.";
+      badge.textContent = workspaceConnections.length ? "Connected" : "Not configured";
+      badge.dataset.state = workspaceConnections.length ? "connected" : "neutral";
+      publishView({ view: "workspace", authorized_sites: workspaceConnections, selected_site: selected || null });
+      if (workspaceInitial) { const initial = workspaceInitial; workspaceInitial = undefined; render({ ...initial, ...(sourceViewId && { presentation: { view_id: sourceViewId } }) }, true); }
+      sendSize();
     }
+
+    async function loadWorkspaceHistories() {
+      const selected = workspaceConnections?.find(value => value.instance === workspaceSite.value);
+      const requestId = ++viewRequestId;
+      detailRequestId += 1;
+      clearTimeout(runTimer);
+      sourceGalaxy = selected;
+      localNavigation = true;
+      currentRun = undefined;
+      currentHistory = undefined;
+      currentContents = undefined;
+      historyList = undefined;
+      visibleCount = CONTENT_PAGE_SIZE;
+      historyVisibleCount = CONTENT_PAGE_SIZE;
+      histories.removeAttribute("aria-busy");
+      workspaceHistories.disabled = !selected || !toolsAvailable();
+      renderHistories({ status: selected ? "connected" : "not_configured", histories: [], message: selected ? "Loading histories…" : "Choose a Galaxy site." });
+      publishView({ view: "workspace", selected_site: selected || null });
+      if (!selected || !toolsAvailable()) return;
+      try {
+        const result = await request("tools/call", { name: "get_histories", arguments: { limit: CONTENT_PAGE_SIZE, offset: 0 } });
+        if (requestId !== viewRequestId) return;
+        if (result?.isError || result?.structuredContent?.status !== "connected") throw new Error("Histories unavailable");
+        historyList = result.structuredContent;
+        renderHistories(historyList);
+      } catch {
+        if (requestId !== viewRequestId) return;
+        renderHistories({ status: "error", histories: [], message: "Histories could not be loaded. Select Histories to retry; no analysis was submitted." });
+      } finally { if (requestId === viewRequestId) sendSize(); }
+    }
+    workspaceSite.addEventListener("change", loadWorkspaceHistories);
+    workspaceHistories.addEventListener("click", loadWorkspaceHistories);
+
+    function updateListVisibility() {
+      const detailOpen = !datasetDetail.hidden;
+      const listVisible = !detailOpen || (workspaceConnections && filesVisible);
+      card.className = workspaceConnections ? "card workspace" : "card";
+      card.dataset.detailOpen = String(detailOpen);
+      card.dataset.filesVisible = String(filesVisible);
+      fileListPanel.hidden = !listVisible || histories.childElementCount === 0;
+      histories.hidden = fileListPanel.hidden;
+      message.hidden = detailOpen;
+      showMore.hidden = !listVisible || !canShowMore;
+      showLess.hidden = !listVisible || histories.childElementCount <= CONTENT_PAGE_SIZE;
+      workspaceFileList.hidden = !workspaceConnections || !detailOpen || !currentContents;
+      workspaceFileList.textContent = filesVisible ? "Hide file list" : "Show file list";
+      workspaceFileList.setAttribute("aria-expanded", String(filesVisible));
+    }
+    workspaceFileList.addEventListener("click", () => {
+      if (workspaceFileList.hidden) return;
+      filesVisible = !filesVisible;
+      updateListVisibility();
+      workspaceFileList.focus();
+      sendSize();
+    });
 
     function syncRunRefresh() {
       clearTimeout(runTimer);
@@ -407,6 +596,7 @@ const HTML = `<!doctype html>
     }
 
     function renderRun() {
+      workspaceHistoryTitle.hidden = true;
       setHistoryLink();
       closeDatasetDetail(false);
       runPanel.hidden = false;
@@ -445,7 +635,7 @@ const HTML = `<!doctype html>
       runResults.disabled = !toolsAvailable() || !string(currentRun.history_id);
       runResultsNote.textContent = runResults.disabled ? "History results are not available for this run yet." : "History results may include inputs and outputs from other runs.";
       syncRunRefresh();
-      publishView({ view: "run_status", report_status: "not_open", state, checked_at: currentRun.checked_at });
+      publishView({ view: "run_status", kind: currentRun.kind, run_id: currentRun.id, name: currentRun.name, history_id: currentRun.history_id || null, report_status: "not_open", state, checked_at: currentRun.checked_at });
     }
 
     async function refreshRun() {
@@ -482,6 +672,8 @@ const HTML = `<!doctype html>
     });
 
     function renderHistories(data) {
+      workspaceHistoryTitle.hidden = true;
+      workspaceHistoryTitle.textContent = "";
       setHistoryLink();
       closeDatasetDetail(false);
       runPanel.hidden = true;
@@ -492,12 +684,12 @@ const HTML = `<!doctype html>
 
       breadcrumbs.hidden = true;
       historyBack.textContent = "‹ Histories";
-      title.textContent = "Galaxy histories";
+      title.textContent = workspaceConnections ? "Galaxy workspace" : "Galaxy histories";
       histories.setAttribute("aria-label", "Galaxy histories");
       badge.dataset.state = status;
       badge.textContent = labels[status];
       instance.textContent = sourceLabel() || string(data.instance);
-      instance.hidden = !instance.textContent;
+      instance.hidden = !!workspaceConnections || !instance.textContent;
       message.textContent = string(data.message) || (status === "not_configured"
         ? "Configure a Galaxy instance to view histories."
         : status === "connected" ? "No histories found." : "Galaxy histories are unavailable.");
@@ -517,7 +709,8 @@ const HTML = `<!doctype html>
         state.className = "state";
         state.textContent = stateLabel(value.state);
         state.dataset.state = string(value.state).toLowerCase();
-        summary.append(name, state);
+        summary.append(name);
+        if (state.textContent) summary.append(state);
         meta.className = "meta";
         if (string(value.update_time)) {
           const updated = document.createElement("span");
@@ -563,9 +756,10 @@ const HTML = `<!doctype html>
       return { format: extension ? extension.slice(0, 6).toUpperCase() : "DATA", label: "Dataset", tone: "data" };
     }
 
-    function renderContents(data) {
+    function renderContents(data, keepDetail = false) {
       setHistoryLink(data);
-      closeDatasetDetail(false);
+      const selectedId = keepDetail ? activeContentButton?.dataset.datasetId : undefined;
+      if (!keepDetail) closeDatasetDetail(false);
       runPanel.hidden = true;
       syncRunRefresh();
       const success = data.success === true && Array.isArray(data.data);
@@ -573,15 +767,19 @@ const HTML = `<!doctype html>
       const rows = items.slice(0, visibleCount);
       const status = success ? "connected" : data.errorKind === "connection" ? "not_configured" : "error";
 
-      breadcrumbs.hidden = !historyList && !currentRun;
+      breadcrumbs.hidden = !!workspaceConnections || (!historyList && !currentRun);
       historyBack.textContent = currentRun ? "‹ Run status" : "‹ Histories";
       historyName.textContent = string(currentHistory?.name) || "History contents";
-      title.textContent = data.view === "dataset" ? "Galaxy report" : currentRun ? "History results" : "History contents";
+      // Opened from the history list, the breadcrumbs already carry the name.
+      title.textContent = workspaceConnections ? "Galaxy workspace" : data.view === "dataset" ? "Galaxy report" : currentRun ? "History results"
+        : breadcrumbs.hidden && string(currentHistory?.name) || "History contents";
+      workspaceHistoryTitle.textContent = string(currentHistory?.name) || "History contents";
+      workspaceHistoryTitle.hidden = !workspaceConnections;
       histories.setAttribute("aria-label", "Galaxy history contents");
       badge.dataset.state = status;
       badge.textContent = success ? data.view === "dataset" ? "Report" : "Results" : labels[status];
       instance.textContent = sourceLabel() || "Galaxy results";
-      instance.hidden = false;
+      instance.hidden = !!workspaceConnections;
       message.textContent = success
         ? data.search ? "Showing " + rows.length + " of " + items.length + " loaded matches. "
           + (data.search.complete === true ? "Search complete for the requested scope." : "Partial search; unsearched items may contain additional matches.")
@@ -604,8 +802,8 @@ const HTML = `<!doctype html>
         const meta = document.createElement("div");
         const state = document.createElement("span");
         const stateValue = string(value.state).toLowerCase() || "unknown";
-        const extension = string(value.extension || value.file_ext).toLowerCase();
-        const canOpen = stateValue === "ok" && string(value.id) && (readableExtensions.has(extension) || extension === "html");
+        const canOpen = stateValue === "ok" && string(value.id) && value.deleted !== true && value.purged !== true
+          && !string(value.history_content_type || value.type).toLowerCase().includes("collection");
 
         row.dataset.view = "content";
         kind.className = "kind";
@@ -621,7 +819,7 @@ const HTML = `<!doctype html>
         state.dataset.state = stateValue === "ok" ? "ok" : ["error", "failed", "discarded"].includes(stateValue) ? "error" : "neutral";
         state.textContent = stateLabel(stateValue);
         summary.append(name, detail);
-        meta.append(state);
+        if (state.textContent) meta.append(state);
         if (canOpen) {
           const view = document.createElement("span");
           const button = document.createElement("button");
@@ -632,7 +830,9 @@ const HTML = `<!doctype html>
           button.type = "button";
           button.disabled = !toolsAvailable();
           button.setAttribute("aria-label", "View contents of " + name.textContent);
-          button.setAttribute("aria-expanded", "false");
+          button.dataset.datasetId = string(value.id);
+          button.setAttribute("aria-expanded", String(value.id === selectedId));
+          if (value.id === selectedId) activeContentButton = button;
           button.setAttribute("aria-controls", "dataset-detail");
           button.append(kind, summary, meta);
           button.addEventListener("click", () => openDataset(value, button));
@@ -648,7 +848,7 @@ const HTML = `<!doctype html>
       showMore.textContent = "Load more";
       showMore.disabled = rows.length >= items.length && !toolsAvailable();
       updateListVisibility();
-      publishView({ view: "history_contents", history_id: currentHistory?.id, report_status: "not_open", visible_items: rows.map(item => ({ id: item.id, name: item.name })), loaded_count: items.length, has_more: data.pagination?.has_more === true });
+      if (!keepDetail) publishView({ view: "history_contents", history_id: currentHistory?.id, report_status: "not_open", visible_items: rows.map(item => ({ id: item.id, name: item.name })), loaded_count: items.length, has_more: data.pagination?.has_more === true });
     }
 
     function openSelectedDataset() {
@@ -731,7 +931,7 @@ const HTML = `<!doctype html>
       }
       if (visibleCount < currentContents.data.length) {
         visibleCount = Math.min(visibleCount + CONTENT_PAGE_SIZE, currentContents.data.length);
-        renderContents(currentContents);
+        renderContents(currentContents, !!workspaceConnections && !datasetDetail.hidden);
         sendSize();
         return;
       }
@@ -751,7 +951,7 @@ const HTML = `<!doctype html>
         if (result?.isError || page?.success !== true || !Array.isArray(page.data)) throw new Error("Page unavailable");
         currentContents = { ...page, data: [...previous.data, ...page.data] };
         visibleCount = Math.min(visibleCount + CONTENT_PAGE_SIZE, currentContents.data.length);
-        renderContents(currentContents);
+        renderContents(currentContents, !!workspaceConnections && !datasetDetail.hidden);
       } catch {
         if (requestId !== viewRequestId || detailId !== detailRequestId) return;
         message.textContent = "More results could not be loaded. The displayed results are unchanged.";
@@ -784,7 +984,7 @@ const HTML = `<!doctype html>
       localNavigation = true;
       viewRequestId += 1;
       visibleCount = Math.max(CONTENT_PAGE_SIZE, histories.childElementCount - CONTENT_PAGE_SIZE);
-      if (currentContents) renderContents(currentContents);
+      if (currentContents) renderContents(currentContents, !!workspaceConnections && !datasetDetail.hidden);
       else {
         historyVisibleCount = visibleCount;
         renderHistories(historyList);
@@ -800,13 +1000,14 @@ const HTML = `<!doctype html>
       detailRequestId += 1;
       setReportLink();
       datasetDetail.hidden = true;
+      filesVisible = false;
       datasetDetail.removeAttribute("aria-busy");
       detailBody.replaceChildren();
       updateListVisibility();
       if (activeContentButton) {
         activeContentButton.disabled = false;
         activeContentButton.setAttribute("aria-expanded", "false");
-        if (returnFocus) activeContentButton.focus();
+        if (returnFocus) (activeContentButton.isConnected === false ? histories.children[0]?.children[0] : activeContentButton)?.focus();
       }
       activeContentButton = undefined;
       if (returnFocus) publishView({ view: "history_contents", history_id: currentHistory?.id, report_status: "not_open", visible_count: histories.childElementCount });
@@ -847,7 +1048,7 @@ const HTML = `<!doctype html>
       detailBody.replaceChildren();
       detailTitle.textContent = string(data.name) || "Dataset contents";
       detailMessage.textContent = (parsed.version ? "FastQC " + parsed.version : string(data.extension).toUpperCase() || "Text result")
-        + " · " + String(text.length) + " characters"
+        + (text.length || data.preview_kind === "text" ? " · " + String(text.length) + " characters" : " · preview")
         + (data.truncated === true ? " · truncated" : "");
 
       if (parsed.modules.length > 0) {
@@ -910,15 +1111,19 @@ const HTML = `<!doctype html>
         detailBody.append(moduleHeading, modules, caveat);
       }
 
+      if (!text) return;
       const raw = document.createElement("details");
       const rawLabel = document.createElement("summary");
       const rawText = document.createElement("pre");
       rawLabel.textContent = "Raw text · scroll sideways";
       rawText.textContent = text;
+      if (string(data.extension).toLowerCase() === "json" && data.truncated !== true) {
+        try { rawText.textContent = JSON.stringify(JSON.parse(text), null, 2); } catch { /* Keep the actual source if it is not complete JSON. */ }
+      }
       rawText.tabIndex = 0;
       rawText.setAttribute("role", "region");
       rawText.setAttribute("aria-label", "Raw dataset text; scroll horizontally for long lines");
-      raw.open = parsed.modules.length === 0;
+      raw.open = parsed.modules.length === 0 && !["pdf", "image", "svg", "audio", "video", "table"].includes(data.preview_kind);
       raw.addEventListener("toggle", sendSize);
       raw.append(rawLabel, rawText);
       detailBody.append(raw);
@@ -987,11 +1192,142 @@ const HTML = `<!doctype html>
       detailBody.append(note, scroller);
     }
 
-    async function openDataset(value, button) {
+    function renderDatasetSummary(value, metadata) {
+      detailBody.replaceChildren();
+      const data = metadata || value;
+      const info = document.createElement("dl");
+      info.className = "statistics";
+      for (const [label, content] of [["Format", data.extension || data.file_ext], ["Status", stateLabel(data.state)], ["Size", Number.isFinite(data.file_size) ? data.file_size.toLocaleString() + " bytes" : undefined], ["Genome", data.metadata_dbkey]]) {
+        if (content === undefined || content === null || content === "") continue;
+        const stat = document.createElement("div");
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+        stat.className = "stat";
+        term.textContent = label;
+        description.textContent = String(content);
+        stat.append(term, description);
+        info.append(stat);
+      }
+      detailBody.append(info);
+      if (typeof data.peek === "string" && data.peek.trim()) {
+        const scroller = document.createElement("div");
+        scroller.className = "report-scroll";
+        scroller.tabIndex = 0;
+        scroller.setAttribute("aria-label", "Galaxy-generated dataset summary");
+        scroller.append(reportPreview(data.peek.slice(0, 100000)).preview);
+        detailBody.append(scroller);
+      }
+      const note = document.createElement("p");
+      note.className = "report-note";
+      note.textContent = (typeof data.peek === "string" && data.peek.trim() ? "Galaxy-generated summary" : "Dataset metadata")
+        + ", not the full file. Open the original in Galaxy for datatype-specific viewers or download.";
+      detailBody.append(note);
+    }
+
+    function renderDatasetPreview(result, value, button) {
+      const data = result.structuredContent;
+      renderDatasetText(data);
+      const preview = result._meta?.preview;
+      const image = result.content?.find(block => block.type === "image" && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(block.mimeType));
+      const asset = image || (["svg", "audio", "video"].includes(preview?.kind) ? preview : undefined);
+      if (asset && typeof asset.data === "string" && asset.data.length <= 2700000 && /^[A-Za-z0-9+/]*={0,2}$/.test(asset.data)) {
+        const kind = preview?.kind;
+        const allowed = kind === "audio" ? ["audio/mpeg", "audio/wav", "audio/ogg", "audio/flac", "audio/mp4"]
+          : kind === "video" ? ["video/mp4", "video/webm", "video/ogg"]
+          : ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
+        if (allowed.includes(asset.mimeType)) {
+          const media = document.createElement(kind === "audio" || kind === "video" ? kind : "img");
+          media.className = kind === "audio" || kind === "video" ? "dataset-media" : "dataset-image";
+          media.setAttribute("src", "data:" + asset.mimeType + ";base64," + asset.data);
+          if (kind === "audio" || kind === "video") {
+            media.setAttribute("controls", "");
+            media.setAttribute("preload", "metadata");
+          } else media.setAttribute("alt", string(data.name) || "Dataset preview");
+          media.addEventListener("load", sendSize, { once: true });
+          media.addEventListener("loadedmetadata", sendSize, { once: true });
+          media.addEventListener("error", () => { detailMessage.textContent = "This host could not display the preview. Open the original in Galaxy."; sendSize(); }, { once: true });
+          const scroller = document.createElement("div");
+          scroller.className = "report-scroll";
+          scroller.tabIndex = 0;
+          scroller.setAttribute("aria-label", media.tagName === "IMG" ? "Dataset preview; whole page fits the viewing area" : "Dataset preview");
+          scroller.append(media);
+          detailBody.prepend(scroller);
+          if (media.tagName === "IMG") {
+            const zoom = document.createElement("button");
+            zoom.className = "close-button";
+            zoom.type = "button";
+            zoom.textContent = "Actual size";
+            zoom.setAttribute("aria-pressed", "false");
+            zoom.addEventListener("click", () => {
+              const actual = media.dataset.actual !== "true";
+              media.dataset.actual = String(actual);
+              zoom.setAttribute("aria-pressed", String(actual));
+              zoom.textContent = actual ? "Fit page" : "Actual size";
+              scroller.setAttribute("aria-label", actual ? "Dataset preview; scroll for more detail" : "Dataset preview; whole page fits the viewing area");
+              sendSize();
+            });
+            detailBody.prepend(zoom);
+          }
+        }
+      }
+      if (preview?.kind === "table" && Array.isArray(preview.rows) && parseFastqc(string(data.text)).modules.length === 0) {
+        const scroller = document.createElement("div");
+        const table = document.createElement("table");
+        const caption = document.createElement("caption");
+        caption.textContent = "Table preview" + (preview.limited ? " · partial excerpt" : "");
+        table.append(caption);
+        for (const row of preview.rows.slice(0, 50)) {
+          if (!Array.isArray(row)) continue;
+          const tr = document.createElement("tr");
+          for (const cell of row.slice(0, 50)) {
+            const td = document.createElement("td");
+            td.textContent = string(cell).slice(0, 2000);
+            tr.append(td);
+          }
+          table.append(tr);
+        }
+        scroller.className = "report-preview report-scroll";
+        scroller.tabIndex = 0;
+        scroller.setAttribute("aria-label", "Table preview; scroll horizontally for columns");
+        scroller.append(table);
+        detailBody.prepend(scroller);
+      }
+      if (Array.isArray(data.limitations) && data.limitations.length) {
+        const note = document.createElement("p");
+        note.className = "report-note";
+        note.textContent = data.limitations.filter(item => typeof item === "string").join(" ");
+        detailBody.append(note);
+      }
+      const page = Number.isSafeInteger(data.page) ? data.page : 1;
+      const pages = Number.isSafeInteger(data.page_count) ? data.page_count : 1;
+      const offset = Number.isSafeInteger(data.offset) ? data.offset : 0;
+      const actions = document.createElement("div");
+      actions.className = "run-actions";
+      const add = (label, targetPage, targetOffset) => {
+        const action = document.createElement("button");
+        action.className = "close-button";
+        action.type = "button";
+        action.textContent = label;
+        action.addEventListener("click", () => { action.disabled = true; return openDataset(value, activeContentButton || button, targetPage, targetOffset, data.source_sha256); });
+        actions.append(action);
+      };
+      const unit = data.preview_kind === "image" ? "frame" : "page";
+      if (page > 1) add("Previous " + unit, page - 1, 0);
+      if (page < pages) add("Next " + unit, page + 1, 0);
+      if (offset > 0) add("Previous text", page, Math.max(0, offset - 20000));
+      if (Number.isSafeInteger(data.next_offset) && data.next_offset > offset) add("More text", page, data.next_offset);
+      if (actions.childElementCount) detailBody.append(actions);
+      if (pages > 1) detailMessage.textContent = (data.preview_kind === "image" ? "Frame " : "Page ") + page + " of " + pages;
+    }
+
+    async function openDataset(value, button, page = 1, offset = 0, expectedHash) {
       if (!toolsAvailable() || button.disabled) return;
       localNavigation = true;
       const requestId = ++detailRequestId;
       setReportLink();
+      try {
+        if (sourceGalaxy) setReportLink({ dataset_id: string(value.id), url: new URL("datasets/" + encodeURIComponent(value.id) + "/display", sourceGalaxy.url.replace(/\\/$/, "") + "/").href });
+      } catch { /* Only the bound Galaxy source may provide the original-file link. */ }
       if (activeContentButton && activeContentButton !== button) {
         activeContentButton.disabled = false;
         activeContentButton.setAttribute("aria-expanded", "false");
@@ -1000,40 +1336,59 @@ const HTML = `<!doctype html>
       button.disabled = true;
       button.setAttribute("aria-expanded", "true");
       datasetDetail.hidden = false;
+      if (!expectedHash) filesVisible = false;
       datasetDetail.setAttribute("aria-busy", "true");
       detailTitle.textContent = string(value.name) || "Dataset contents";
       detailMessage.textContent = "Loading real Galaxy data…";
       const reportContext = { view: "report", dataset_id: string(value.id), name: string(value.name) };
       publishView({ ...reportContext, report_status: "loading", display_verified: false });
-      detailBody.replaceChildren();
+      if (!expectedHash) detailBody.replaceChildren();
       updateListVisibility();
-      detailClose.focus();
+      if (!expectedHash) detailClose.focus();
       sendSize();
 
+      let contentRejected = false;
       try {
         const html = string(value.extension || value.file_ext).toLowerCase() === "html";
         const result = await request("tools/call", {
-          name: html ? "get_dataset_html" : "get_dataset_text",
-          arguments: { datasetId: string(value.id) },
+          name: html ? "get_dataset_html" : "read_dataset_report",
+          arguments: { datasetId: string(value.id), ...(!html && { page, offset, includeImage: true }) },
         });
         if (requestId !== detailRequestId) return;
+        contentRejected = result?.isError === true;
         if (result?.isError || !result?.structuredContent) {
           throw new Error("Dataset content was unavailable");
         }
+        if (expectedHash && result.structuredContent.source_sha256 !== expectedHash) throw new Error("Dataset changed between previews");
         if (html && typeof result?._meta?.html === "string") {
           setReportLink(result.structuredContent);
           renderDatasetHtml(result.structuredContent, result._meta.html);
           publishView({ ...reportContext, report_status: "content_loaded", presentation: "static_report_preview", display_verified: false, report_content_in_feedback: false });
         } else if (!html && typeof result.structuredContent.text === "string") {
-          renderDatasetText(result.structuredContent);
+          setReportLink(result.structuredContent);
+          renderDatasetPreview(result, value, button);
           publishView({ ...reportContext, report_status: "text_view_ready", characters_returned: result.structuredContent.text.length, truncated: result.structuredContent.truncated === true });
         } else {
           throw new Error("Dataset text was unavailable");
         }
       } catch {
         if (requestId !== detailRequestId) return;
-        detailMessage.textContent = "This report could not be loaded. Return to Results and try again.";
+        detailMessage.textContent = expectedHash ? "The requested page could not be confirmed. The last loaded preview is retained. Return to Results to reload."
+          : contentRejected ? "Full-file preview is unavailable; dataset details and the original Galaxy link remain available."
+          : "This report could not be loaded as a full preview. Dataset details and original file remain available. Return to Results to try again.";
         publishView({ ...reportContext, report_status: "load_failed", display_verified: false });
+        if (!expectedHash) {
+          renderDatasetSummary(value);
+          if (contentRejected) void request("tools/call", { name: "get_dataset_details", arguments: { datasetId: string(value.id) } }).then(details => {
+            if (requestId !== detailRequestId) return;
+            if (details?.structuredContent?.success === true && details.structuredContent.data?.id === value.id) {
+              renderDatasetSummary(value, details.structuredContent.data);
+              detailMessage.textContent = "Galaxy dataset summary · not a full-file preview";
+              publishView({ ...reportContext, report_status: "summary_loaded", coverage: "Galaxy-generated summary only", display_verified: false });
+              sendSize();
+            }
+          }).catch(() => {}); // Keep known metadata and the original link if Galaxy's summary is unavailable.
+        }
       } finally {
         button.disabled = false;
         if (requestId === detailRequestId) {
@@ -1050,22 +1405,25 @@ const HTML = `<!doctype html>
       return sourceGalaxy ? sourceGalaxy.instance + " · " + new URL(sourceGalaxy.url).host : "";
     }
 
-    function render(candidate) {
+    function render(candidate, workspaceInitialView = false) {
       if (closed) return;
       const data = candidate?.structuredContent ?? candidate;
       if (!data || typeof data !== "object") return;
       const incomingViewId = string(data.presentation?.view_id);
       if (localNavigation && (!incomingViewId || incomingViewId === sourceViewId)) return;
-      if (incomingViewId && incomingViewId !== sourceViewId && seenViewIds.has(incomingViewId)) return;
+      // Host layout/context updates may replay the current result; only a new presentation replaces it.
+      if (incomingViewId && !workspaceInitialView && seenViewIds.has(incomingViewId)) return;
       if (incomingViewId) seenViewIds.add(incomingViewId);
       sourceViewId = incomingViewId;
+      if (data.view === "workspace") { localNavigation = false; renderWorkspace(data); return; }
+      if (!workspaceInitialView) { workspaceConnections = undefined; workspaceNav.hidden = true; workspaceHistoryTitle.hidden = true; }
       sourceGalaxy = undefined;
       try {
         const url = new URL(data.galaxy?.url);
         if (string(data.galaxy?.instance) && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password) {
           sourceGalaxy = { instance: data.galaxy.instance, url: data.galaxy.url };
         }
-      } catch { /* Saved single-site results may not carry an explicit source. */ }
+      } catch { /* Missing or invalid source leaves the view unbound. */ }
       localNavigation = false;
       visibleCount = CONTENT_PAGE_SIZE;
       viewRequestId += 1;
@@ -1084,7 +1442,7 @@ const HTML = `<!doctype html>
         currentRun = undefined;
         historyList = undefined;
         currentContents = data;
-        currentHistory = { id: string(data.history_id) };
+        currentHistory = { id: string(data.history_id), name: string(data.history_name) };
         firstOffset = Number.isSafeInteger(data.pagination?.offset) ? data.pagination.offset : 0;
         renderContents(data);
         openSelectedDataset();
@@ -1120,12 +1478,13 @@ const HTML = `<!doctype html>
       if (rpc?.jsonrpc === "2.0" && rpc?.method === "ui/notifications/tool-result") {
         render(rpc.params?.structuredContent ?? rpc.params);
       }
-      if (rpc.method === "ui/notifications/host-context-changed") applyTheme(rpc.params?.theme);
+      if (rpc.method === "ui/notifications/host-context-changed") applyHostContext(rpc.params);
     });
 
     function closeView() {
       closed = true;
       initialized = false;
+      manageConnections.disabled = true;
       clearTimeout(runTimer);
       cardObserver?.disconnect();
       viewRequestId += 1;
@@ -1166,6 +1525,15 @@ const HTML = `<!doctype html>
       if (theme === "light" || theme === "dark") document.documentElement.style.colorScheme = theme;
     }
 
+    function applyHostContext(context) {
+      applyTheme(context?.theme);
+      if (!context?.containerDimensions) return;
+      const height = context.containerDimensions.height ?? context.containerDimensions.maxHeight;
+      // Use the host's limit, not the iframe's self-sized height, to avoid resize feedback loops.
+      figureHeightLimit = Number.isFinite(height) && height > 0 ? height : undefined;
+      sendSize();
+    }
+
     applyTheme(window.openai?.theme);
     const initial = window.openai?.toolOutput;
     if (initial) render(initial.structuredContent ?? initial);
@@ -1175,7 +1543,7 @@ const HTML = `<!doctype html>
       viewReconnect.disabled = true;
       try {
         const result = await request("ui/initialize", {
-          appInfo: { name: "Galaxy results", version: "1.9.0" },
+          appInfo: { name: "Galaxy results", version: "1.10.0" },
           appCapabilities: {},
           protocolVersion: "2026-01-26",
         }, 15000);
@@ -1185,14 +1553,20 @@ const HTML = `<!doctype html>
         if (result?.hostCapabilities !== undefined) canCallTools = !!result.hostCapabilities?.serverTools;
         canUpdateContext = !!result?.hostCapabilities?.updateModelContext;
         canOpenLinks = !!result?.hostCapabilities?.openLinks;
-        applyTheme(result?.hostContext?.theme);
+        manageConnections.hidden = !canCallTools || !managementAvailable;
+        workspaceSite.disabled = !canCallTools;
+        workspaceHistories.disabled = !canCallTools || !workspaceSite.value;
+        applyHostContext(result?.hostContext);
         post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
         if (!datasetDetail.hidden && localNavigation) {
           if (viewContext) publishView(viewContext);
         } else if (currentRun && !currentHistory) renderRun();
         else if (currentContents) renderContents(currentContents);
         else if (historyList) renderHistories(historyList);
-        else {
+        else if (workspaceConnections) {
+          title.textContent = "Galaxy workspace";
+          message.textContent = workspaceConnections.length ? "Choose a site to browse its histories and reports." : "Connect a Galaxy account in your client to begin.";
+        } else {
           badge.dataset.state = "neutral";
           badge.textContent = "Waiting";
           message.textContent = "Waiting for Galaxy results…";
@@ -1221,10 +1595,17 @@ const HTML = `<!doctype html>
 </body>
 </html>`;
 
-export function registerHistorySummaryResource(server: McpServer, domain?: string): void {
+/** `authOrigin` is the OAuth broker's origin, where connection-management links open. */
+export function registerHistorySummaryResource(server: McpServer, domain?: string, authOrigin?: string): void {
+  const html = HTML.replace("__MANAGEMENT_ORIGIN__", () => JSON.stringify(authOrigin ?? ""));
   const metadata = {
     // Host-specific origins are not portable. Claude uses its default isolated origin.
     ...(domain && { "openai/widgetDomain": domain }),
+    "openai/widgetCSP": {
+      connect_domains: [],
+      resource_domains: [],
+      redirect_domains: authOrigin ? [authOrigin] : [],
+    },
     ui: {
       prefersBorder: true,
       csp: {
@@ -1233,14 +1614,12 @@ export function registerHistorySummaryResource(server: McpServer, domain?: strin
       },
     },
   };
-  for (const [index, resourceUri] of [...LEGACY_HISTORY_SUMMARY_URIS, HISTORY_SUMMARY_URI].entries()) {
-    server.registerResource(
-      `galaxy-history-v${index + 1}`,
-      resourceUri,
-      { title: "Galaxy runs, histories and results", mimeType: MIME_TYPE, _meta: metadata },
-      (uri) => ({
-        contents: [{ uri: uri.href, mimeType: MIME_TYPE, text: HTML, _meta: metadata }],
-      }),
-    );
-  }
+  server.registerResource(
+    "galaxy-history",
+    HISTORY_SUMMARY_URI,
+    { title: "Galaxy runs, histories and results", mimeType: MIME_TYPE, _meta: metadata },
+    (uri) => ({
+      contents: [{ uri: uri.href, mimeType: MIME_TYPE, text: html, _meta: metadata }],
+    }),
+  );
 }

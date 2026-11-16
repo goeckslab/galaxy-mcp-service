@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 // Synthetic report only: no Galaxy run, patient data or scientific claims.
 export function reportPdf(): Buffer {
   const streams = [
@@ -24,4 +26,10 @@ export function reportPdf(): Buffer {
   pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
   pdf += offsets.slice(1).map(offset => `${String(offset).padStart(10, "0")} 00000 n \n`).join("");
   return Buffer.from(pdf + `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+}
+
+export function rasterImage(format: string, frames = 1): Buffer {
+  const result = spawnSync("python3", ["-c", "from PIL import Image; import io, sys; frames=[Image.new('RGB', (20, 10), (20 + n * 30, 40, 80)) for n in range(int(sys.argv[2]))]; buffer=io.BytesIO(); frames[0].save(buffer, format=sys.argv[1], **({'save_all':True, 'append_images':frames[1:]} if len(frames)>1 else {})); sys.stdout.buffer.write(buffer.getvalue())", format, String(frames)]);
+  if (result.status !== 0) throw new Error("Raster fixture requires Python 3 and Pillow.");
+  return result.stdout;
 }

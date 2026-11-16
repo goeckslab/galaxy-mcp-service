@@ -1,5 +1,5 @@
 FROM node:22-bookworm-slim AS base
-RUN apt-get update && apt-get install -y --no-install-recommends python3 poppler-utils fonts-dejavu-core && apt-get clean
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pil poppler-utils fonts-dejavu-core && apt-get clean
 
 FROM base AS build
 

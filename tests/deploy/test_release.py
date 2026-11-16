@@ -16,7 +16,11 @@ spec.loader.exec_module(release)
 IMAGE = "galaxy-mcp-service:release-test"
 PREVIOUS = "sha256:" + "a" * 64
 PREVIOUS_BROKER = "sha256:" + "b" * 64
-CONFIG = "MCP_HOST='mcp.example.org'\nBROKER_HOST='auth.example.org'\nGALAXY_MCP_IMAGE='galaxy-mcp-service:release-old'\nBROKER_SECRET='fixture-only'\nGALAXY_INSTANCES_JSON='{\"main\":\"https://usegalaxy.org\"}'\n"
+CONFIG = "MCP_HOST='mcp.example.org'\nGALAXY_MCP_IMAGE='galaxy-mcp-service:release-old'\nBROKER_SECRET='fixture-only'\nGALAXY_INSTANCES_JSON='{\"us\":\"https://usegalaxy.org\"}'\n"
+
+
+LEGACY = "LEGACY_MCP_HOST='old-mcp.example.org'\nLEGACY_BROKER_HOST='old-auth.example.org'\n"
+CONTAINERS = {"mcp": "current-id", "broker": "broker-id", "legacy-mcp": "legacy-mcp-id", "legacy-broker": "legacy-broker-id"}
 
 
 class ReleaseTest(unittest.TestCase):
@@ -33,42 +37,56 @@ class ReleaseTest(unittest.TestCase):
         self.fail_build = False
         self.failed_updates = 0
         self.fail_broker = False
+        self.fail_reload = False
+        self.builds = []
 
     def command(self, args, **kwargs):
-        if args[-3:] == ["ps", "-q", "mcp"]:
-            return subprocess.CompletedProcess(args, 0, "current-id\n")
-        if args[-3:] == ["ps", "-q", "broker"]:
-            return subprocess.CompletedProcess(args, 0, "broker-id\n")
+        if args[-3:-1] == ["ps", "-q"]:
+            return subprocess.CompletedProcess(args, 0, CONTAINERS[args[-1]] + "\n")
         if "{{.State.Health.Status}}" in args:
             return subprocess.CompletedProcess(args, 0, "healthy\n")
         if "{{.Image}}" in args:
-            return subprocess.CompletedProcess(args, 0, (PREVIOUS_BROKER if args[-1] == "broker-id" else PREVIOUS) + "\n")
-        if args[:2] == ["docker", "build"] and self.fail_build:
-            raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0, (PREVIOUS_BROKER if args[-1].endswith("broker-id") else PREVIOUS) + "\n")
+        if args[:2] == ["docker", "build"]:
+            self.builds.append(args)
+            if self.fail_build:
+                raise subprocess.CalledProcessError(1, args)
         if "up" in args:
             self.updates.append((args, kwargs))
-            self.assertIn(args[-1], ["mcp", "broker"])
+            self.assertIn(args[-1], CONTAINERS)
             self.assertIn("--no-deps", args)
             self.assertIn("--wait", args)
             self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
             self.assertIn("BROKER_SECRET='fixture-only'", self.config.read_text())
             if len(self.updates) <= self.failed_updates or (self.fail_broker and args[-1] == "broker" and kwargs["env"]["GALAXY_MCP_IMAGE"] == IMAGE):
                 raise subprocess.CalledProcessError(1, args)
+            if self.fail_reload and "--force-recreate" in args:
+                raise subprocess.CalledProcessError(1, args)
         return subprocess.CompletedProcess(args, 0, "")
 
-    def perform(self, check_side_effect=None, with_broker=False, instances=None):
+    def perform(self, check_side_effect=None, with_broker=False, instances=None, build_context=None):
         with patch.object(release, "run", side_effect=self.command), \
              patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)), \
              patch.object(release, "public_check", side_effect=check_side_effect), \
              patch.dict(os.environ, {"GALAXY_MCP_IMAGE": "unrelated-image", "BROKER_SECRET": "unrelated-secret"}):
-            release.release(self.root, IMAGE, with_broker=with_broker, instances=instances)
+            release.release(self.root, IMAGE, with_broker=with_broker, instances=instances, build_context=build_context)
+
+    def test_clean_build_context_keeps_live_proxy_configuration_unchanged(self):
+        (self.root / "deploy").mkdir()
+        proxy = self.root / "deploy/Caddyfile"
+        proxy.write_text("operator-only fixture")
+        context = self.root / "public-source"
+        context.mkdir()
+        self.perform(build_context=context)
+        self.assertEqual(self.builds, [["docker", "build", "-t", IMAGE, str(context)]])
+        self.assertEqual(proxy.read_text(), "operator-only fixture")
 
     def test_approved_sites_update_together_and_roll_back_with_configuration(self):
         sites = json.loads((REPO / "deploy/galaxy-instances.json").read_text())
         self.perform(with_broker=True, instances=sites)
         line = next(line for line in self.config.read_text().splitlines() if line.startswith("GALAXY_INSTANCES_JSON="))
         self.assertEqual(json.loads(shlex.split(line.split("=", 1)[1])[0]), sites)
-        self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker"])
+        self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker", "mcp"])
         self.config.write_text(CONFIG)
         self.updates.clear()
         self.fail_broker = True
@@ -77,23 +95,37 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(self.config.read_text(), CONFIG)
         self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker", "broker", "mcp"])
 
+    def test_legacy_hostnames_release_and_check_both_deployments(self):
+        self.config.write_text(CONFIG + LEGACY)
+        checks = []
+        self.perform(lambda origin, broker=False: checks.append((origin, broker)), with_broker=True)
+        self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "legacy-mcp", "broker", "legacy-broker", "legacy-mcp"])
+        self.assertEqual(self.updates[-1][0][-3:], ["--force-recreate", "mcp", "legacy-mcp"])
+        self.assertEqual(set(checks), {("https://mcp.example.org", True), ("https://mcp.example.org", False),
+                                       ("https://old-auth.example.org", True), ("https://old-mcp.example.org", False)})
+        self.config.write_text(CONFIG + LEGACY.splitlines(keepends=True)[0])
+        with patch.object(release, "run") as command, self.assertRaisesRegex(ValueError, "together"):
+            release.release(self.root, IMAGE)
+        command.assert_not_called()
+
     def test_site_update_rejects_removal_remapping_and_unsafe_input_before_docker(self):
-        for sites in [[], {}, {"eu": "https://usegalaxy.eu"}, {"main": "https://changed.example.org"},
-                      {"main": "https://usegalaxy.org", "au": "http://usegalaxy.org.au"},
-                      {"main": "https://usegalaxy.org", "au": "https://user:key@example.org"},
-                      {"main": "https://usegalaxy.org", "au": "https://example.org?key=value"},
-                      {"main": "https://usegalaxy.org", "bad alias": "https://example.org"},
-                      {"main": "https://usegalaxy.org", 1: "https://example.org"}]:
+        for sites in [[], {}, {"eu": "https://usegalaxy.eu"}, {"us": "https://changed.example.org"},
+                      {"us": "https://usegalaxy.org", "au": "http://usegalaxy.org.au"},
+                      {"us": "https://usegalaxy.org", "au": "https://user:key@example.org"},
+                      {"us": "https://usegalaxy.org", "au": "https://example.org?key=value"},
+                      {"us": "https://usegalaxy.org", "bad alias": "https://example.org"},
+                      {"us": "https://usegalaxy.org", 1: "https://example.org"}]:
             with patch.object(release, "run") as command, self.assertRaises(ValueError):
                 release.release(self.root, IMAGE, with_broker=True, instances=sites)
             command.assert_not_called()
             self.assertEqual(self.config.read_text(), CONFIG)
         with self.assertRaisesRegex(ValueError, "--with-broker"):
-            self.perform(instances={"main": "https://usegalaxy.org"})
+            self.perform(instances={"us": "https://usegalaxy.org"})
 
     def test_bundle_release_orders_updates_and_restores_distinct_images_on_broker_failure(self):
         self.perform(with_broker=True)
-        self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker"])
+        self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker", "mcp"])
+        self.assertIn("--force-recreate", self.updates[-1][0])
         self.updates.clear()
         self.config.write_text(CONFIG)
         self.fail_broker = True
@@ -101,6 +133,14 @@ class ReleaseTest(unittest.TestCase):
             self.perform(with_broker=True)
         self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker", "broker", "mcp"])
         self.assertEqual([kwargs["env"]["GALAXY_MCP_IMAGE"] for _, kwargs in self.updates], [IMAGE, IMAGE, PREVIOUS_BROKER, PREVIOUS])
+        self.assertEqual(self.config.read_text(), CONFIG)
+
+    def test_broker_capability_reload_failure_restores_both_images(self):
+        self.fail_reload = True
+        with self.assertRaisesRegex(RuntimeError, "previous configuration and image restored"):
+            self.perform(with_broker=True)
+        self.assertEqual([args[-1] for args, _ in self.updates], ["mcp", "broker", "mcp", "broker", "mcp"])
+        self.assertEqual([kwargs["env"]["GALAXY_MCP_IMAGE"] for _, kwargs in self.updates], [IMAGE, IMAGE, IMAGE, PREVIOUS_BROKER, PREVIOUS])
         self.assertEqual(self.config.read_text(), CONFIG)
 
     def test_bundle_release_rolls_back_when_broker_public_check_fails(self):

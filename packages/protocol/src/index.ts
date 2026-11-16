@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+export * from "./events.js";
+
 export const PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion";
 export const CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo";
 export const CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities";

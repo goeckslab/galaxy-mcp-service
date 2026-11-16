@@ -12,11 +12,11 @@ This repository is for developers and service operators. **To use the hosted ser
 | Operate a service for multiple users/sites | [Credential broker](docs/broker.md), then [AWS deployment](docs/aws-deployment.md) |
 | Integrate a client or change tool behavior | [Tool and UI contracts](#tool-and-ui-contracts) and [validation](docs/client-compatibility.md) |
 
-The hosted preview uses `https://mcp.galaxymcp.org/mcp` and authorization at `https://auth.galaxymcp.org`. Hosting, directory publication and client acceptance are separate milestones. See the validation guide before treating a deployment or provider as production-ready.
+The hosted preview uses `https://mcp.galaxyproject.org/mcp`, which also serves its authorization. The original `https://mcp.galaxymcp.org/mcp` keeps serving existing connections during the move. Hosting, directory publication and client acceptance are separate milestones. See the validation guide before treating a deployment or provider as production-ready.
 
 ## Run locally
 
-Requirements: Node.js 22, pnpm, Python 3 and Poppler (`pdfinfo`, `pdftotext`, `pdftoppm`) on PATH. For report decoding, install Poppler with `brew install poppler` on macOS or `sudo apt-get install poppler-utils fonts-dejavu-core` on Debian/Ubuntu. The container image includes these tools and fonts.
+Requirements: Node.js 22, pnpm, Python 3 with Pillow, and Poppler (`pdfinfo`, `pdftotext`, `pdftoppm`) on PATH. On macOS, use `brew install poppler` and install Pillow in your Python environment. On Debian/Ubuntu, use `sudo apt-get install python3-pil poppler-utils fonts-dejavu-core`. The container image includes these tools and fonts.
 
 From the repository root:
 
@@ -68,13 +68,15 @@ Use the [AWS guide](docs/aws-deployment.md) for first deployment, routine update
 | Histories and datasets | List and inspect histories, datasets, collections and provenance; create histories and upload from HTTP(S) URLs |
 | Tools and workflows | Search installed tools, inspect live input templates, run tools, find/import curated IWC workflows and invoke stored workflows |
 | Existing runs | Observe accepted tool requests and workflow invocations; cancellation requires destructive-action confirmation |
-| Reports | Read text and HTML/PDF evidence; request compatible history, report and status cards |
+| Reports | Read bounded text, table, HTML/PDF and image evidence; preview datasets in the same viewer, with Galaxy summaries for unsupported files |
+| Galaxy panel | Browse authorized sites, histories and reports in one manually openable view; optionally open a specific existing run |
+| Run notifications | Opt in to one execution-outcome event for an existing tool request or workflow invocation |
 
 The remote interface does not expose local-path upload/download, collection creation, direct history deletion, unrestricted account management or arbitrary user scripts. Tool availability and Galaxy permissions still depend on the selected instance.
 
 ### Site selection and pagination
 
-Start with `get_galaxy_connections`. Every other Galaxy tool accepts `instance`; it is required when the grant includes multiple sites. Retain the source with each handle. Data and identifiers remain site-local; the service does not automatically transfer data between sites.
+Start with `get_galaxy_connections`. Galaxy operations accept `instance`; it is required when the grant includes multiple sites. `show_galaxy` can instead open an unselected workspace so the user chooses a site. Connection management applies to the authorization, not one site's data. Retain the source with each handle. Data and identifiers remain site-local; the service does not automatically transfer data between sites.
 
 History lists default to five histories, up to 20 per request. Contents of a single history default to five items, up to 100 per request. Follow `pagination.next_offset` while `has_more` is true; page length is not a total. Filtered history-content lookup inspects at most 500 source items per call. Keep the same filters when continuing: its offset counts inspected items, not matches. An empty partial page is not proof of absence, and multiple matches require selection. History-content paging uses Galaxy's `v=dev` API rather than an unpaginated fallback.
 
@@ -90,13 +92,35 @@ Use `get_dataset_text` for short machine-readable reports. For HTML, PDF or long
 
 HTML extraction retains text, headings and tab-separated table cells. `figures` lists up to 100 image candidates; `includeImage: true` with an available `imageIndex` requests an embedded raster image. PDF extraction returns one page at a time; `includeImage` renders that page at up to 2,000 pixels. The service does not run OCR or another LLM. Use numerical source data for exact calculations, not estimates from plots.
 
-Reads accept only completed, non-deleted HTML/PDF/txt/tabular/CSV/TSV datasets from the authenticated connection. Limits are 20 MB source, 50,000 returned characters, one optional image up to 2 MB and two simultaneous readers, with bounded download/decoder time and memory. Redirects and arbitrary asset URLs are not followed. Temporary files are removed after each request; interrupted processes may leave files until container recreation. Credentials are not passed to the decoder. Returned limitations identify omitted visuals, external content and incomplete extraction; source content is untrusted data, not instructions.
+Reads accept completed, non-deleted datasets from the authenticated connection. UTF-8 text is supported without a datatype whitelist, including JSON, XML, Markdown and scientific text formats. Gzip text is decompressed with a 20 MB expansion limit. PNG, JPEG, GIF, WebP, BMP and TIFF are decoded into bounded raster previews; multi-frame files can be inspected frame by frame. Static SVG and small native audio/video previews are UI-only, not model-visible visual or transcript evidence. Binary formats are never presented as decoded text.
+
+Limits are 20 MB source, 50,000 returned characters, one optional image up to 2 MB and two simultaneous readers, with bounded download/decoder time and memory. Raster input is limited to 16 million pixels. Table previews have at most 50 rows, 50 columns and 2,000 characters per cell; source text remains separately available. Redirects and arbitrary asset URLs are not followed. Temporary files are removed after each request; interrupted processes may leave files until container recreation. Credentials are not passed to the decoder. Returned limitations identify omitted visuals, external content and incomplete extraction; source content is untrusted data, not instructions.
 
 `get_histories` and `get_history_contents` read data without creating cards. Use `show_histories` when the user needs a history selector, or `show_history` to browse one history's outputs. Both lists initially display at most five rows. Load more reveals or fetches the next five; Load less collapses the list without fetching again. Navigation preserves the expanded list. The default guidance is one useful card per response, not a card for every intermediate lookup, result or polling step.
 
-`show_dataset` requests a standalone card for a known report when needed. The card's HTML preview is static text, tables and embedded raster images: no nested report frames, source scripts/styles or external assets. The original-report link opens Galaxy separately and may require sign-in. Cards support horizontal report/text scrolling.
+`show_dataset` requests a standalone card for a known completed dataset when needed. All completed, non-deleted datasets have a details entry; this does not mean the card implements every Galaxy datatype-specific application. The same viewer provides static HTML, PDF pages, images, CSV/TSV tables, formatted JSON and plain/structured text, with page/text navigation and horizontal scrolling. Unsupported, oversized or binary files use Galaxy's own `peek` summary and metadata, with an original-file link for specialized viewers or download. Collections remain separate from dataset files.
+
+Previews contain no nested report frames, source scripts/styles or external assets. SVG is sanitized and displayed in native image mode. Audio/video controls never autoplay and are limited to 2 MB; codec and sandbox support depend on the host. The original-file link opens Galaxy separately and may require sign-in. A loaded summary or preview is not proof that all file content was read.
 
 Cards use the standard MCP Apps bridge; OpenAI globals are optional compatibility fallbacks. Successful presentation requests return `presentation.display_status: unconfirmed`; ordinary data reads do not request presentation. UI feedback is correlated through `presentation.view_id`, retains `display_verified: false` and does not contain the report evidence. Even when a host accepts `ui/update-model-context`, that is not proof the user saw a card. The model must read evidence separately before interpreting it. Tools-only clients receive text and structured results without needing a renderer. After deploying changes to tool names or UI metadata, refresh the developer-mode tool catalog and update the review snapshot; a client holding old definitions can still request the old rendering behavior.
+
+### Manually openable Galaxy panel
+
+`show_galaxy` reuses the same MCP Apps resource as the cards. Its `openai/ui.entrypoints` metadata registers global and thread entrypoints for clients supporting [Plugin Extensions](https://developers.openai.com/plugins/build/extensions). Users can open the panel without asking for a new card, choose an authorized site, browse five histories at a time, inspect supported reports and open connection management. Navigation reads data in place rather than rendering another chat card. Selection context identifies the site and selected history, report or run; it is not a substitute for reading result evidence.
+
+Calling `show_galaxy` with `instance`, `kind` and `runId` opens the status of that existing analysis in the panel. Without a run, it opens history browsing. Multiple sites require an explicit choice; switching sites clears the previous selection and rejects stale or mismatched responses. This panel does not list every past tool run or automatically infer the analysis relevant to a chat.
+
+The global/thread entrypoints require host support. Other MCP Apps clients can render the same view when the tool is invoked; tools-only clients still receive structured results. No provider-specific sidebar is promised for Claude. These entrypoints need a deployment, client catalog refresh and real-client acceptance testing before being advertised as available on the hosted service.
+
+### Opt-in execution-outcome notifications
+
+In broker-authenticated mode, MCP 2.0 clients can discover `galaxy.run.outcome` through `events/list`, then subscribe with an explicit `instance`, `kind` and existing `runId`. For example, a user can ask, “Notify me when this Galaxy analysis finishes or fails.” The client supplies its verified HTTPS callback and signing secret; users do not configure a webhook or paste secrets into chat. Never subscribe automatically or monitor all future analyses.
+
+The event reports one observed execution outcome: `completed`, `failed`, `cancelled` or `empty`. It includes the source site, run name and handle, check time and available history link. Completion does not validate scientific findings; a detected failure may occur while other jobs continue. Temporary query failures are not reported as failed analyses. Subscriptions observe existing work only; they never submit, restart or cancel an analysis and do not automatically rewrite an old card.
+
+Subscriptions persist encrypted in the broker database, bound to the exact OAuth grant rather than a ten-minute access token or browser cookie. The default and maximum subscription lifetime is 24 hours, capped by the grant's remaining lifetime. The client renews before `refreshBefore`; renewal preserves pending and acknowledged outcomes. Delivery is at-least-once, with stable event IDs and up to five transient delivery attempts. Receivers must deduplicate those IDs. `events/unsubscribe`, removal of the selected site, expiry or grant revocation stops delivery; none cancels a Galaxy job. See [broker security and delivery behavior](docs/broker.md#run-event-subscriptions).
+
+The protocol and callback behavior follow [MCP Events in ChatGPT](https://developers.openai.com/plugins/build/mcp-events). Standard MCP tools and cards remain usable by clients without Events. Deploy the broker and MCP server together, rescan the catalog and test a real ChatGPT subscription before claiming hosted notification availability. Directory approval and deployment are separate.
 
 ## Development and operations
 

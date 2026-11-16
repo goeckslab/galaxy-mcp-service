@@ -6,6 +6,7 @@ import {
   type OAuthTokenVerifier,
 } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { eventLease, type EventRequest } from "@galaxy-mcp-service/protocol";
 
 export const GALAXY_SCOPE = "galaxy:full";
 
@@ -14,6 +15,8 @@ export interface UniversalAuth {
   resourceServerUrl: URL;
   scopes: string[];
   verifier: OAuthTokenVerifier;
+  createManagementLink(token: string, signal?: AbortSignal): Promise<{ url: string; expiresIn: number }>;
+  eventRequest?: EventRequest;
 }
 
 interface UniversalAuthConfig {
@@ -46,17 +49,16 @@ const activeTokenSchema = z
     aud: z.union([z.string(), z.array(z.string())]),
     client_id: z.string().min(1),
     exp: z.number().int(),
-    galaxy_api_key: z.string().min(1).optional(),
-    galaxy_instance: z.string().min(1).optional(),
-    galaxy_url: z.string().min(1).optional(),
     galaxy_connections: z.array(z.object({
       instance: z.string().min(1), api_key: z.string().min(1), url: z.string().min(1),
-    }).strict()).min(1).max(10).optional(),
+    }).strict()).min(1).max(10),
     iss: z.string().min(1),
     scope: z.union([z.string(), z.array(z.string())]),
     sub: z.string().min(1),
   })
   .passthrough();
+
+const managementLinkSchema = z.object({ url: z.string().url(), expires_in: z.number().int().min(1).max(300) }).strict();
 
 function secureUrl(value: string, label: string, allowLocalHttp = false): URL {
   const url = new URL(value);
@@ -131,6 +133,10 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
   secureUrl(metadata.data.authorization_endpoint, "OAuth authorization endpoint", true);
   secureUrl(metadata.data.token_endpoint, "OAuth token endpoint", true);
   const introspectionUrl = secureUrl(metadata.data.introspection_endpoint, "OAuth introspection endpoint", true);
+  const managementEndpoint = new URL("/management/ticket", metadata.data.issuer);
+  const resourceAuthorization = `Basic ${Buffer.from(
+    `${basicCredential(config.introspectionClientId)}:${basicCredential(config.introspectionClientSecret)}`,
+  ).toString("base64")}`;
 
   const verifier: OAuthTokenVerifier = {
     async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -140,9 +146,7 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
           method: "POST",
           headers: {
             accept: "application/json",
-            authorization: `Basic ${Buffer.from(
-              `${basicCredential(config.introspectionClientId)}:${basicCredential(config.introspectionClientSecret)}`,
-            ).toString("base64")}`,
+            authorization: resourceAuthorization,
             "content-type": "application/x-www-form-urlencoded",
           },
           body: new URLSearchParams({ token, token_type_hint: "access_token" }),
@@ -172,16 +176,13 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         ? parsed.data.scope
         : parsed.data.scope.split(/\s+/).filter(Boolean);
       const audiences = Array.isArray(parsed.data.aud) ? parsed.data.aud : [parsed.data.aud];
-      const values = parsed.data.galaxy_connections ?? (parsed.data.galaxy_instance && parsed.data.galaxy_api_key
-        ? [{ instance: parsed.data.galaxy_instance, api_key: parsed.data.galaxy_api_key, url: parsed.data.galaxy_url }] : []);
+      const values = parsed.data.galaxy_connections;
       if (
         parsed.data.iss !== metadata.data.issuer ||
         !audiences.includes(resourceServerUrl.href) ||
         parsed.data.exp <= Date.now() / 1000 ||
-        !values.length ||
-        (parsed.data.galaxy_connections !== undefined && (parsed.data.galaxy_instance !== undefined || parsed.data.galaxy_api_key !== undefined || parsed.data.galaxy_url !== undefined)) ||
         new Set(values.map(value => value.instance)).size !== values.length ||
-        values.some(value => !instances.has(value.instance) || (value.url !== undefined && value.url !== instances.get(value.instance)))
+        values.some(value => !instances.has(value.instance) || value.url !== instances.get(value.instance))
       ) {
         throw new OAuthError(OAuthErrorCode.InvalidToken, "The access token is not valid for this service.");
       }
@@ -196,16 +197,55 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         extra: {
           subject: parsed.data.sub,
           galaxies: connections,
-          ...(connections.length === 1 && { galaxy: connections[0] }),
         },
       };
     },
   };
 
+  const eventRequest: EventRequest = async (action, body, signal) => {
+    const response = await fetchImpl(new URL(`/events/${action}`, metadata.data.issuer), {
+      method: "POST", redirect: "error",
+      headers: { accept: "application/json", authorization: resourceAuthorization, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ payload: JSON.stringify(body) }),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error("Run subscription storage is unavailable or unauthorized.");
+    const result: unknown = await response.json();
+    if (action === "claim" || action === "check") {
+      const parsed = z.object({ item: eventLease.nullable() }).strict().parse(result);
+      if (parsed.item && (parsed.item.connection.baseUrl !== instances.get(parsed.item.connection.instance)
+        || parsed.item.subscription.arguments.instance !== parsed.item.connection.instance)) throw new Error("Run subscription source is invalid.");
+      return parsed;
+    }
+    return result;
+  };
   return {
     oauthMetadata: metadata.data as OAuthMetadata,
     resourceServerUrl,
     scopes: [GALAXY_SCOPE],
     verifier,
+    ...(metadata.data.galaxy_run_events_supported === true && { eventRequest }),
+    async createManagementLink(token, signal) {
+      let response: Response;
+      try {
+        response = await fetchImpl(managementEndpoint, {
+          method: "POST",
+          headers: { accept: "application/json", authorization: resourceAuthorization, "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ token }),
+          redirect: "error",
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new Error("Connection management is temporarily unavailable.");
+      }
+      if (!response.ok) throw new Error("Connection management is temporarily unavailable.");
+      const parsed = managementLinkSchema.safeParse(await response.json().catch(() => undefined));
+      if (!parsed.success) throw new Error("Connection management returned an invalid link.");
+      const url = secureUrl(parsed.data.url, "Connection management link", true);
+      if (url.origin !== new URL(metadata.data.issuer).origin || !/^\/connections\/[A-Za-z0-9_-]{43}$/.test(url.pathname) || url.search) {
+        throw new Error("Connection management returned an invalid link.");
+      }
+      return { url: url.href, expiresIn: parsed.data.expires_in };
+    },
   };
 }

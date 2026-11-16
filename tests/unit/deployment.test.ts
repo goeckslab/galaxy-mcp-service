@@ -8,15 +8,15 @@ const lightsail = JSON.parse(readFileSync(new URL("../../deploy/lightsail.compos
 
 describe("AWS deployment boundary", () => {
   it("keeps the Lightsail database and app ports private with mandatory Universal OAuth inputs", () => {
-    const { proxy, mcp, broker, postgres } = lightsail.services;
-    expect(Object.keys(lightsail.services)).toEqual(["proxy", "mcp", "broker", "postgres"]);
+    const { proxy, mcp, broker, postgres, "legacy-mcp": legacyMcp, "legacy-broker": legacyBroker } = lightsail.services;
+    expect(Object.keys(lightsail.services)).toEqual(["proxy", "mcp", "broker", "legacy-mcp", "legacy-broker", "postgres"]);
     expect(proxy.ports).toEqual(["80:80", "443:443"]);
-    for (const backend of [mcp, broker, postgres]) expect(backend).not.toHaveProperty("ports");
+    for (const backend of [mcp, broker, legacyMcp, legacyBroker, postgres]) expect(backend).not.toHaveProperty("ports");
     expect(lightsail.networks.database.internal).toBe(true);
     expect(postgres.networks).toEqual(["database"]);
     expect(broker.networks).toEqual(["app", "database"]);
     expect(mcp.networks).toEqual(["app"]);
-    expect(proxy.networks.app.aliases).toEqual(["${BROKER_HOST:?Set the owned broker hostname}"]);
+    expect(proxy.networks.app.aliases).toEqual(["${MCP_HOST:?Set the owned MCP hostname}", "${LEGACY_BROKER_HOST:?Set the original broker hostname}"]);
     expect(proxy).not.toHaveProperty("depends_on");
     expect(broker.depends_on.postgres.condition).toBe("service_healthy");
     expect(mcp.depends_on.broker.condition).toBe("service_healthy");
@@ -33,6 +33,15 @@ describe("AWS deployment boundary", () => {
     expect(mcp.environment.OAUTH_INTROSPECTION_CLIENT_ID).toBe(broker.environment.BROKER_RESOURCE_CLIENT_ID);
     expect(broker.environment.BROKER_RESOURCE).toBe(`${mcp.environment.PUBLIC_BASE_URL}/mcp`);
     expect(mcp.environment.OAUTH_METADATA_URL).toBe(`${broker.environment.BROKER_ISSUER}/.well-known/oauth-authorization-server`);
+    expect(broker.environment.BROKER_ISSUER).toBe(mcp.environment.PUBLIC_BASE_URL);
+    // The original hostnames reuse the same image, secrets and database through extends.
+    expect(legacyMcp.extends).toEqual({ service: "mcp" });
+    expect(legacyBroker.extends).toEqual({ service: "broker" });
+    expect(Object.keys(legacyMcp.environment).sort()).toEqual(["OAUTH_METADATA_URL", "PUBLIC_BASE_URL"]);
+    expect(Object.keys(legacyBroker.environment).sort()).toEqual(["BROKER_ISSUER", "BROKER_RESOURCE"]);
+    expect(legacyBroker.environment.BROKER_RESOURCE).toBe(`${legacyMcp.environment.PUBLIC_BASE_URL}/mcp`);
+    expect(legacyMcp.environment.OAUTH_METADATA_URL).toBe(`${legacyBroker.environment.BROKER_ISSUER}/.well-known/oauth-authorization-server`);
+    expect(legacyMcp.depends_on["legacy-broker"].condition).toBe("service_healthy");
     for (const key of ["BROKER_ENCRYPTION_KEY", "BROKER_JWKS_JSON", "BROKER_COOKIE_KEYS_JSON", "BROKER_CLIENTS_JSON"])
       expect(broker.environment[key]).toContain(":?");
     for (const sidecar of [proxy, postgres]) expect(sidecar.image).toMatch(/@sha256:[a-f0-9]{64}$/);
@@ -43,6 +52,10 @@ describe("AWS deployment boundary", () => {
     expect(proxyConfig).toContain("cert_issuer acme");
     expect(proxyConfig).toContain("dir https://acme-v02.api.letsencrypt.org/directory");
     expect(proxyConfig).not.toContain("tls_insecure_skip_verify");
+    const shared = /\{\$MCP_HOST\} \{\n\t@broker path ([^\n]+)/.exec(proxyConfig)![1]!.split(" ");
+    for (const path of ["/.well-known/oauth-authorization-server", "/auth", "/token", "/jwks", "/interaction/*", "/connections/*", "/management/*", "/events/*"])
+      expect(shared).toContain(path);
+    for (const path of ["/", "/mcp", "/readyz", "/support"]) expect(shared).not.toContain(path);
     expect(proxyConfig).not.toContain("openai-apps-challenge");
     expect(proxyConfig).not.toContain("/review/");
   });

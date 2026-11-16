@@ -58,6 +58,20 @@ it("routes one authorization concurrently across sites with identical handles an
   };
   try {
     expect((await call("get_galaxy_connections")).structuredContent.connections).toEqual(Object.entries(instances).map(([instance, url]) => ({ instance, url })));
+    const beforePanel = calls.length;
+    expect((await call("show_galaxy")).structuredContent).toMatchObject({ view: "workspace", connections: [
+      { instance: "us", url: instances.us }, { instance: "eu", url: instances.eu },
+    ] });
+    expect(calls).toHaveLength(beforePanel); // Opening a multi-site panel does not silently pick a site.
+    expect((await call("show_galaxy", { instance: "eu" })).structuredContent.initial).toMatchObject({
+      galaxy: { instance: "eu", url: instances.eu }, histories: [{ name: "eu history" }],
+    });
+    expect((await call("show_galaxy", { instance: "us", kind: "tool", runId: "r1" })).structuredContent.initial).toMatchObject({
+      galaxy: { instance: "us", url: instances.us }, run: { kind: "tool", id: "r1", state: "completed" },
+    });
+    const beforeInvalid = calls.length;
+    expect((await call("show_galaxy", { instance: "us", runId: "r1" })).isError).toBe(true);
+    expect(calls).toHaveLength(beforeInvalid);
     const routes: [string, Record<string, unknown>][] = [
       ["get_histories", {}], ["get_history_contents", { historyId: "h1" }], ["show_dataset", { datasetId: "d1" }],
       ["get_dataset_html", { datasetId: "d1" }], ["get_dataset_text", { datasetId: "t1" }],

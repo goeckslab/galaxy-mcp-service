@@ -1,17 +1,19 @@
 import { execFile } from "node:child_process";
-import { createHash, createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
+import { createHash, createHmac, createPublicKey, generateKeyPairSync, randomBytes, verify } from "node:crypto";
 import { once } from "node:events";
 import { createServer, type Server, type RequestListener } from "node:http";
 import type { AddressInfo } from "node:net";
 import { promisify } from "node:util";
 
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createBroker, type BrokerConfig } from "../../apps/broker/src/broker.js";
 import { createStore } from "../../apps/broker/src/store.js";
 import { loadUniversalAuth } from "../../apps/service/src/auth.js";
 import { modernRequest, startTestService } from "../helpers/service.js";
+import { eventLease, type SubscribeParams } from "../../packages/protocol/src/events.js";
+import { processRunEvent } from "../../apps/service/src/events.js";
 
 const exec = promisify(execFile);
 const resource = "http://127.0.0.1/mcp";
@@ -50,13 +52,17 @@ class Browser {
   }
 }
 
-async function authorization(client = "client-a", overrides: Record<string, string> = {}, browser = new Browser()) {
+async function authorization(client = "client-a", overrides: Record<string, string | undefined> = {}, browser = new Browser()) {
   const verifier = randomBytes(32).toString("base64url");
   const params = new URLSearchParams({
     client_id: client, redirect_uri: callback, response_type: "code", scope: "galaxy:full offline_access",
     resource, state: "fixture-state", code_challenge_method: "S256",
-    code_challenge: createHash("sha256").update(verifier).digest("base64url"), ...overrides,
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
   });
+  for (const [name, value] of Object.entries(overrides)) {
+    if (value === undefined) params.delete(name);
+    else params.set(name, value);
+  }
   const start = await browser.request(`${config.issuer}/auth?${params}`);
   expect(start.status).toBe(303);
   const location = new URL(start.headers.get("location")!, config.issuer).href;
@@ -73,7 +79,7 @@ async function authorization(client = "client-a", overrides: Record<string, stri
 async function consent(auth: Awaited<ReturnType<typeof authorization>>, instance: "us" | "eu" = "us", changes: Record<string, string> = {}) {
   return auth.browser.request(auth.location, {
     method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ csrf: auth.csrf, instance, api_key: keys[instance], consent: "yes", action: "connect", ...changes }),
+    body: new URLSearchParams({ csrf: auth.csrf, [`api_key.${instance}`]: keys[instance], consent: "yes", action: "connect", ...changes }),
   });
 }
 
@@ -90,7 +96,7 @@ async function resume(auth: Awaited<ReturnType<typeof authorization>>, response:
   return auth.browser.request(target!);
 }
 
-async function codeFor(instance: "us" | "eu" = "us", client = "client-a", browser?: Browser, parameters: Record<string, string> = {}, connectionFields?: Record<string, string>) {
+async function codeFor(instance: "us" | "eu" = "us", client = "client-a", browser?: Browser, parameters: Record<string, string | undefined> = {}, connectionFields?: Record<string, string>) {
   const auth = await authorization(client, parameters, browser);
   let response = await resume(auth, await (connectionFields ? auth.browser.request(auth.location, {
     method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
@@ -113,8 +119,9 @@ async function codeFor(instance: "us" | "eu" = "us", client = "client-a", browse
     expect(response.status, await response.clone().text()).toBe(303);
     const location = new URL(response.headers.get("location")!, config.issuer);
     if (location.origin !== config.issuer) {
-      expect(location.origin + location.pathname).toBe(callback);
+      expect(location.origin + location.pathname).toBe(parameters.redirect_uri || callback);
       expect(location.searchParams.get("state")).toBe("fixture-state");
+      expect(location.searchParams.get("iss")).toBe(config.issuer);
       expect(location.searchParams.get("error")).toBeNull();
       const code = location.searchParams.get("code");
       expect(code).toBeTruthy();
@@ -133,7 +140,7 @@ async function tokenRequest(form: Record<string, string>) {
 async function exchange(auth: Awaited<ReturnType<typeof codeFor>>, overrides: Record<string, string> = {}) {
   return tokenRequest({ client_id: auth.client, grant_type: "authorization_code", code: auth.code, code_verifier: auth.verifier, redirect_uri: callback, resource, ...overrides });
 }
-interface Tokens { access_token: string; refresh_token: string; token_type: string; expires_in: number }
+interface Tokens { access_token: string; refresh_token: string; token_type: string; expires_in: number; scope?: string }
 async function tokens(instance: "us" | "eu" = "us", client = "client-a") {
   const response = await exchange(await codeFor(instance, client));
   const body = await response.json();
@@ -149,6 +156,17 @@ async function introspect(token: string, client = config.resourceClientId, secre
   if (secret) headers.authorization = `Basic ${Buffer.from(`${client}:${secret}`).toString("base64")}`;
   else form.set("client_id", client);
   return fetch(`${config.issuer}/token/introspection`, { method: "POST", headers, body: form });
+}
+
+async function managementLink(token: string) {
+  return fetch(`${config.issuer}/management/ticket`, {
+    method: "POST",
+    headers: {
+      authorization: `Basic ${Buffer.from(`${config.resourceClientId}:${config.resourceClientSecret}`).toString("base64")}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ token }),
+  });
 }
 
 beforeAll(async () => {
@@ -176,6 +194,8 @@ beforeAll(async () => {
     if (req.method !== "GET" || req.headers["x-api-key"] !== keys[instance]) { res.writeHead(401).end("{}"); return; }
     if (path.endsWith("/api/users/current")) res.end(JSON.stringify({ id: "same-id-on-two-instances", deleted: false }));
     else if (path.endsWith("/api/histories")) res.end(JSON.stringify([{ id: `history-${instance}`, name: `Private ${instance} history`, state: "ok" }]));
+    else if (path.endsWith("/api/invocations/run-1/jobs_summary")) res.end(JSON.stringify({ states: { ok: 1 }, populated_state: "ok" }));
+    else if (path.endsWith("/api/invocations/run-1")) res.end(JSON.stringify({ id: "run-1", state: "scheduled", history_id: `history-${instance}` }));
     else res.writeHead(404).end("{}");
   });
   galaxy.listen(0, "127.0.0.1"); await once(galaxy, "listening");
@@ -208,18 +228,191 @@ afterAll(async () => {
 }, 30000);
 
 describe("durable Galaxy credential broker", () => {
-  it("labels usegalaxy.org as US without renaming the stored main alias", async () => {
+  it.each([
+    ["https://chatgpt.com/oauth/codex/client.json", ["http://127.0.0.1:43111/callback", "http://localhost:43112/callback"]],
+    ["https://claude.ai/oauth/claude-code-client-metadata", ["http://localhost:43113/callback", "http://127.0.0.1:43114/callback"]],
+    ["https://vscode.dev/oauth/client-metadata.json", ["http://127.0.0.1:43115/", "https://vscode.dev/redirect"]],
+    ["galaxy-cursor", ["http://localhost:8787/callback", "https://www.cursor.com/agents/mcp/oauth/callback"]],
+    ["galaxy-gemini-cli", ["http://localhost:43116/oauth/callback", "http://localhost:43117/oauth/callback"]],
+    ["galaxy-grok-build", ["http://localhost:3120/callback", "http://127.0.0.1:43118/callback"]],
+    ["https://grok.com/oauth/mcp-client.json", ["https://grok.com/connectors-oauth-exchange-code/", "https://console.x.ai/connectors-oauth-exchange-code/"]],
+  ] as const)("authorizes the curated %s profile with issuer-bound callbacks, PKCE and isolated rotating refresh", async (clientId, callbacks) => {
+    const client = await broker.provider.Client.find(clientId);
+    expect(client?.applicationType).toBe(clientId === "https://grok.com/oauth/mcp-client.json" ? "web" : "native");
+    for (const redirect of ["https://attacker.example/callback", "http://localhost.attacker.example/callback",
+      "http://127.0.0.2/callback", "http://localhost/callback/extra", "http://localhost/oauth/callback?next=evil",
+      "https://grok.com/connectors-oauth-exchange-code", "https://grok.com:444/connectors-oauth-exchange-code/",
+      "https://console.x.ai/connectors-oauth-exchange-code/?next=evil"]) {
+      expect(client?.redirectUriAllowed(redirect)).toBe(false);
+      const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirect, response_type: "code",
+        scope: "galaxy:full", resource, code_challenge_method: "S256", code_challenge: "fixture-challenge" });
+      const rejected = await fetch(`${config.issuer}/auth?${params}`, { redirect: "manual" });
+      expect(rejected.headers.get("location")).toBeNull();
+      expect(rejected.status).toBe(400);
+    }
+    for (const redirect_uri of callbacks) {
+      const issued = await codeFor("us", clientId, undefined, { redirect_uri });
+      const response = await exchange(issued, { redirect_uri });
+      expect(response.status).toBe(200);
+      const body = await response.json() as Tokens;
+      expect(body.refresh_token).toBeTruthy();
+      expect(JSON.stringify(body)).not.toContain(keys.us);
+      expect(await (await introspect(body.access_token)).json()).toMatchObject({ active: true, client_id: clientId,
+        galaxy_connections: [{ instance: "us", api_key: keys.us }] });
+      const refreshed = await tokenRequest({ client_id: clientId, grant_type: "refresh_token", refresh_token: body.refresh_token, resource });
+      expect(refreshed.status).toBe(200);
+      const rotated = await refreshed.json() as Tokens;
+      expect(rotated.refresh_token).not.toBe(body.refresh_token);
+      expect((await tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: rotated.refresh_token, resource })).status).toBe(400);
+    }
+  });
+
+  it("uses Claude's published identity without registration while retaining consent, PKCE, refresh and metadata boundaries", async () => {
+    const callbackUri = "https://claude.ai/api/mcp/auth_callback";
+    const clientId = `https://claude.ai/oauth/fixture-${randomBytes(6).toString("hex")}`;
+    const metadata = { client_id: clientId, client_name: "Untrusted display name", redirect_uris: [callbackUri],
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" };
+    const documents = new Map<string, object>([[clientId, metadata]]);
+    const fetched: string[] = [];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (!url.startsWith(config.issuer) && !url.startsWith(address(galaxy))) {
+        fetched.push(url);
+        expect(init?.redirect).toBe("manual");
+        expect(init?.signal).toBeTruthy();
+        if (!documents.has(url)) throw new Error("Unexpected metadata fetch.");
+        return Response.json(documents.get(url), { headers: { "cache-control": "max-age=60" } });
+      }
+      return originalFetch(input, init);
+    });
+    try {
+      const discovery = await (await fetch(`${config.issuer}/.well-known/oauth-authorization-server`)).json();
+      expect(discovery.client_id_metadata_document_supported).toBe(true);
+      expect(discovery.token_endpoint_auth_methods_supported).toContain("none");
+      expect(discovery.registration_endpoint).toBeUndefined();
+      expect(discovery.authorization_response_iss_parameter_supported).toBe(true);
+      const issued = await codeFor("us", clientId, undefined, { redirect_uri: callbackUri });
+      expect(issued.html).toContain("<strong>claude.ai</strong>");
+      expect(issued.html).not.toContain(metadata.client_name);
+      expect(fetched).toEqual([clientId]);
+      expect((await exchange(issued, { redirect_uri: callbackUri, code_verifier: "wrong-verifier" })).status).toBe(400);
+      // A rejected exchange may consume its code, so use a fresh explicitly consented grant.
+      const response = await exchange(await codeFor("us", clientId, undefined, { redirect_uri: callbackUri }), { redirect_uri: callbackUri });
+      const body = await response.json() as Tokens;
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({ token_type: "Bearer", expires_in: 600 });
+      expect(JSON.stringify(body)).not.toContain(keys.us);
+      expect(await (await introspect(body.access_token)).json()).toMatchObject({ active: true, client_id: clientId,
+        galaxy_connections: [{ instance: "us", api_key: keys.us }] });
+      const refreshed = await tokenRequest({ client_id: clientId, grant_type: "refresh_token", refresh_token: body.refresh_token, resource });
+      const rotated = await refreshed.json() as Tokens;
+      expect(refreshed.status).toBe(200);
+      expect(rotated.refresh_token).not.toBe(body.refresh_token);
+      expect(await (await introspect(rotated.access_token)).json()).toMatchObject({ active: true, client_id: clientId });
+      expect((await tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: rotated.refresh_token, resource })).status).toBe(400);
+
+      for (const overrides of [{ redirect_uri: "https://attacker.example/callback" }, { code_challenge_method: "plain" }]) {
+        const params = new URLSearchParams({ client_id: clientId, redirect_uri: callbackUri, response_type: "code", scope: "galaxy:full",
+          resource, code_challenge: createHash("sha256").update("fixture-verifier").digest("base64url"), code_challenge_method: "S256", ...overrides });
+        const rejected = await fetch(`${config.issuer}/auth?${params}`, { redirect: "manual" });
+        expect(rejected.headers.get("location") || "").not.toContain("/interaction/");
+        expect(rejected.headers.get("location") || "").not.toContain("attacker.example");
+      }
+      const before = fetched.length;
+      for (const id of ["https://attacker.example/oauth/metadata", "https://claude.ai.attacker.example/oauth/metadata",
+        "http://claude.ai/oauth/metadata", "https://claude.ai/oauth/metadata?redirect=evil", "https://claude.ai/profile/metadata"])
+        await expect(broker.provider.Client.find(id).catch(() => undefined)).resolves.toBeUndefined();
+      expect(fetched).toHaveLength(before);
+      for (const changes of [{ client_id: "https://attacker.example/wrong" }, { client_secret: "forbidden" },
+        { token_endpoint_auth_method: "private_key_jwt", jwks: config.jwks }, { redirect_uris: ["https://attacker.example/callback"] }]) {
+        const id = `https://claude.ai/oauth/fixture-${randomBytes(6).toString("hex")}`;
+        documents.set(id, { ...metadata, client_id: id, ...changes });
+        await expect(broker.provider.Client.find(id)).rejects.toThrow();
+      }
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("persists grant-bound run events, leases concurrent workers, rotates secrets, and stops on removal or revocation", async () => {
+    const issuedResponse = await exchange(await codeFor("us", "client-a", undefined, {}, { "api_key.us": keys.us, "api_key.eu": keys.eu }));
+    let issued = await issuedResponse.json() as Tokens;
+    const other = await tokens("us", "client-a"); // Same account/client, different exact grant.
+    const auth = await loadUniversalAuth({ metadataUrl: `${config.issuer}/.well-known/oauth-authorization-server`,
+      introspectionClientId: config.resourceClientId, introspectionClientSecret: config.resourceClientSecret,
+      instancesJson: JSON.stringify(config.instances), resourceServerUrl: resource });
+    const backend = auth.eventRequest!;
+    const params: SubscribeParams = { name: "galaxy.run.outcome", arguments: { instance: "us", kind: "workflow", runId: "run-1" },
+      delivery: { mode: "webhook", url: "https://callback.example.test/run-1", secret: "whsec_" + randomBytes(32).toString("base64") } };
+    const prepared = await backend("prepare", { token: issued.access_token, params }) as { id: string; verification_required: boolean };
+    expect(prepared.verification_required).toBe(true);
+    const subscribe = (token: string, value = params) => backend("subscribe", { token, params: value, verified_at: Date.now() }) as Promise<{ id: string; refreshBefore: string }>;
+    const first = await subscribe(issued.access_token);
+    expect(first.id).toBe(prepared.id);
+    expect(Date.parse(first.refreshBefore)).toBeLessThanOrEqual(Date.now() + 86400000);
+    expect(await backend("prepare", { token: issued.access_token, params })).toMatchObject({ verification_required: false });
+    expect((await subscribe(other.access_token)).id).not.toBe(first.id);
+    await backend("unsubscribe", { token: other.access_token, params: { ...params, delivery: { mode: "webhook", url: params.delivery.url } } });
+    expect((await subscribe(issued.access_token, { ...params, arguments: { runId: "run-1", kind: "workflow", instance: "us" } })).id).toBe(first.id);
+    const encrypted = await database.query<{ payload: Buffer }>("SELECT payload FROM galaxy_broker_events WHERE id=$1", [first.id]);
+    expect(encrypted.rows[0]!.payload.toString()).not.toContain(params.delivery.secret);
+    expect(encrypted.rows[0]!.payload.toString()).not.toContain("callback.example.test");
+    await broker.close(); broker = await createBroker(config); handler = broker.callback;
+    const claims = await Promise.all([backend("claim", {}), backend("claim", {})]) as { item: unknown }[];
+    expect(claims.filter(value => value.item)).toHaveLength(1);
+    const item = eventLease.parse(claims.find(value => value.item)!.item);
+    const rotated = { ...params, delivery: { ...params.delivery, secret: "whsec_" + randomBytes(32).toString("base64") } };
+    expect(await backend("prepare", { token: issued.access_token, params: rotated })).toMatchObject({ verification_required: true });
+    expect((await subscribe(issued.access_token, rotated)).id).toBe(first.id);
+    expect(await backend("save", { id: first.id, revision: item.revision, lease: item.lease, state: { phase: "delivered", attempts: 0 }, delay_ms: 0, release: true })).toEqual({ saved: null });
+    let deliveredId: string | undefined;
+    await processRunEvent(backend, new AbortController().signal, async (subscription, id) => {
+      expect(subscription.delivery.secret).toBe(rotated.delivery.secret);
+      expect(subscription.previousSecret).toBe(params.delivery.secret);
+      deliveredId = id;
+      return { status: 503, text: "" };
+    });
+    expect(deliveredId).toBeTruthy();
+    const tokenId = createHmac("sha256", config.encryptionKey).update(`AccessToken:${issued.access_token}`).digest("hex");
+    await database.query("UPDATE galaxy_broker_models SET expires_at=0 WHERE model='AccessToken' AND id=$1", [tokenId]);
+    expect(await (await introspect(issued.access_token)).json()).toEqual({ active: false });
+    await broker.close(); broker = await createBroker(config); handler = broker.callback;
+    await database.query("UPDATE galaxy_broker_events SET next_at=0 WHERE id=$1", [first.id]);
+    await processRunEvent(backend, new AbortController().signal, async (_subscription, id) => {
+      expect(id).toBe(deliveredId); return { status: 200, text: "" };
+    });
+    const refreshed = await tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: issued.refresh_token, resource });
+    expect(refreshed.status).toBe(200);
+    issued = await refreshed.json() as Tokens;
+    await subscribe(issued.access_token, rotated);
+    expect(await backend("claim", {})).toEqual({ item: null }); // Renewal does not repeat an acknowledged outcome.
+    const euParams = { ...rotated, arguments: { ...rotated.arguments, instance: "eu" } };
+    const euSub = await subscribe(issued.access_token, euParams);
+    const credential = await broker.provider.AccessToken.find(issued.access_token);
+    const store = await createStore(databaseUrl, config.encryptionKey);
+    try {
+      const managed = await store.managedCredential(credential!.accountId!, credential!.grantId!);
+      await store.removeConnection(credential!.accountId!, managed!.grantId, "eu");
+      expect((await database.query("SELECT id FROM galaxy_broker_events WHERE id=$1", [euSub.id])).rowCount).toBe(0);
+      await expect(subscribe(issued.access_token, euParams)).rejects.toThrow();
+      const pending = await subscribe(issued.access_token, { ...rotated, delivery: { ...rotated.delivery, url: "https://callback.example.test/another" } });
+      await store.revokeCredential(credential!.accountId!, managed!.grantId);
+      expect((await database.query("SELECT id FROM galaxy_broker_events WHERE id=$1", [pending.id])).rowCount).toBe(0);
+      expect(await backend("claim", {})).toEqual({ item: null });
+      expect(await (await introspect(other.access_token)).json()).toMatchObject({ active: true });
+    } finally { await store.close(); }
+  });
+
+  it("uses only the us alias for usegalaxy.org authorization", async () => {
     const before = apiRequests.length;
     await broker.close();
-    broker = await createBroker({ ...config, instances: { ...config.instances, main: "https://usegalaxy.org" } });
+    broker = await createBroker({ ...config, instances: { ...config.instances, us: "https://usegalaxy.org" } });
     handler = broker.callback;
     try {
       const { html } = await authorization();
-      expect(html).toContain('<label for="key-main">US — https://usegalaxy.org</label>');
-      expect(html).toContain('id="key-main" name="api_key.main"');
+      expect(html).toContain('<label for="key-us">US — https://usegalaxy.org</label>');
+      expect(html).toContain('id="key-us" name="api_key.us"');
       expect(html).toContain('aria-label="API key for US"');
-      expect(html).not.toContain('aria-label="API key for main"');
-      expect(html).toContain(`<label for="key-us">us — ${config.instances.us}</label>`);
+      expect(html).not.toContain('api_key.main');
       expect(html).toContain('name="api_key.eu"');
       expect(apiRequests).toHaveLength(before);
     } finally {
@@ -230,7 +423,7 @@ describe("durable Galaxy credential broker", () => {
   });
 
   it("authorizes a bundle atomically, persists and refreshes it, and revokes it without expanding or revoking an existing grant", async () => {
-    const legacy = await tokens();
+    const priorToken = await tokens();
     const fields = { "api_key.us": keys.us, "api_key.eu": keys.eu };
     const response = await exchange(await codeFor("us", "client-a", undefined, {}, fields));
     expect(response.status).toBe(200);
@@ -245,9 +438,8 @@ describe("durable Galaxy credential broker", () => {
     expect(introspection).not.toHaveProperty("galaxy_api_key");
     expect(introspection).not.toHaveProperty("galaxy_instance");
     expect(await (await introspect(issued.access_token, "client-a", "")).json()).toEqual({ active: false });
-    const prior = await (await introspect(legacy.access_token)).json();
-    expect(prior).toMatchObject({ active: true, galaxy_instance: "us" });
-    expect(prior).not.toHaveProperty("galaxy_connections");
+    const prior = await (await introspect(priorToken.access_token)).json();
+    expect(prior).toMatchObject({ active: true, galaxy_connections: [{ instance: "us", api_key: keys.us, url: config.instances.us }] });
     expect(prior.sub).not.toBe(introspection.sub);
     const auth = await loadUniversalAuth({ metadataUrl: `${config.issuer}/.well-known/oauth-authorization-server`,
       introspectionClientId: config.resourceClientId, introspectionClientSecret: config.resourceClientSecret,
@@ -280,12 +472,94 @@ describe("durable Galaxy credential broker", () => {
     expect(revoked.status).toBe(200);
     expect(await (await introspect(rotated.access_token)).json()).toEqual({ active: false });
     expect((await tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: rotated.refresh_token, resource })).status).toBe(400);
-    expect(await (await introspect(legacy.access_token)).json()).toMatchObject({ active: true, galaxy_instance: "us" });
+    expect(await (await introspect(priorToken.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ instance: "us" }] });
     const stored = await database.query<{ payload: Buffer }>("SELECT payload FROM galaxy_broker_credentials");
     expect(stored.rows.every(row => !row.payload.includes(keys.us) && !row.payload.includes(keys.eu))).toBe(true);
   });
 
-  it("rejects empty, mixed, duplicate, unapproved and partially invalid connection sets without saving any keys", async () => {
+  it("manages the active plugin grant without cookies, exposing keys or changing another grant", async () => {
+    const connected = await codeFor("us", "client-a", undefined, {}, { "api_key.us": keys.us, "api_key.eu": keys.eu });
+    const issuedResponse = await exchange(connected);
+    expect(issuedResponse.status).toBe(200);
+    const issued = await issuedResponse.json() as Tokens;
+    const other = await tokens("us", "client-b");
+    const unrelated = await tokens("eu", "client-a");
+
+    const denied = await managementLink("inactive-token");
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toMatch(/fixture-.*-key/);
+    const linkResponse = await managementLink(issued.access_token);
+    expect(linkResponse.status).toBe(200);
+    const link = await linkResponse.json() as { url: string; expires_in: number };
+    expect(link).toMatchObject({ expires_in: 300 });
+    expect(link.url).toMatch(new RegExp(`^${config.issuer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/connections/[A-Za-z0-9_-]+$`));
+    expect(link.url).not.toMatch(/fixture-.*-key/);
+
+    const browser = new Browser();
+    expect((await browser.request(`${config.issuer}/connections`)).status).toBe(200);
+    const landing = await browser.request(link.url);
+    expect(landing.status).toBe(200);
+    expect(landing.headers.get("referrer-policy")).toBe("same-origin");
+    expect(browser.cookies.size).toBe(0);
+    const landingHtml = await landing.text();
+    const ticket = /name="ticket" value="([^"]+)"/.exec(landingHtml)?.[1];
+    expect(ticket).toBeTruthy();
+    const page = await browser.request(`${config.issuer}/connections/start`, {
+      method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ ticket: ticket! }),
+    });
+    expect(page.status).toBe(200);
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
+    const html = await page.text();
+    expect(html).toContain("Manage connections");
+    expect(html).toContain(config.instances.us);
+    expect(html).toContain(config.instances.eu);
+    expect(html).toContain("Can browse Galaxy data and run analyses");
+    expect(html).not.toMatch(/fixture-.*-key|grant_id|account_id/);
+    expect(browser.cookies.size).toBe(0);
+    expect((await browser.request(`${config.issuer}/connections/start`, {
+      method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ ticket: ticket! }),
+    })).status).toBe(400);
+    const remove = /<strong>us<\/strong>[\s\S]*?name="action_token" value="([^"]+)"[\s\S]*?Remove site/.exec(html)?.[1];
+    expect(remove).toBeTruthy();
+
+    const forged = await browser.request(`${config.issuer}/connections/action`, {
+      method: "POST", headers: { origin: "https://attacker.example", "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action_token: remove! }),
+    });
+    expect(forged.status).toBe(400);
+    expect(await (await introspect(issued.access_token)).json()).toMatchObject({
+      active: true, galaxy_connections: [{ instance: "eu" }, { instance: "us" }],
+    });
+
+    const removed = await browser.request(`${config.issuer}/connections/action`, {
+      method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action_token: remove! }),
+    });
+    expect(removed.status).toBe(200);
+    expect(await (await introspect(issued.access_token)).json()).toMatchObject({
+      active: true, galaxy_connections: [{ instance: "eu", api_key: keys.eu }],
+    });
+    expect((await browser.request(`${config.issuer}/connections/action`, {
+      method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action_token: remove! }),
+    })).status).toBe(400);
+    const removedHtml = await removed.text();
+    expect(removedHtml).not.toContain(config.instances.us);
+    const revoke = /name="action_token" value="([^"]+)"><button class="danger">Disconnect this client/.exec(removedHtml)?.[1];
+    expect(revoke).toBeTruthy();
+    const revoked = await browser.request(`${config.issuer}/connections/action`, {
+      method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action_token: revoke! }),
+    });
+    expect(revoked.status).toBe(200);
+    expect(await (await introspect(issued.access_token)).json()).toEqual({ active: false });
+    expect(await (await introspect(other.access_token)).json()).toMatchObject({ active: true });
+    expect(await (await introspect(unrelated.access_token)).json()).toMatchObject({ active: true });
+  });
+
+  it("rejects empty, obsolete, duplicate, unapproved and partially invalid connection sets without saving any keys", async () => {
     for (const fields of [
       {}, { "api_key.us": "", "api_key.eu": "" },
       { "api_key.us": keys.us, "api_key.eu": "wrong-key" },
@@ -301,6 +575,7 @@ describe("durable Galaxy credential broker", () => {
       expect(auth.html).toContain("Request a site on GitHub");
       expect(auth.html).toContain("Never post API keys, passwords or private data.");
       expect(auth.html).toContain("every server for which I entered a key");
+      expect(auth.html).toContain("ask your connected assistant naturally to remove a site, rotate a key or disconnect Galaxy");
       const response = await auth.browser.request(auth.location, { method: "POST",
         headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields }),
@@ -315,7 +590,7 @@ describe("durable Galaxy credential broker", () => {
     expect((await auth.browser.request(auth.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" }, body })).status).toBe(400);
     const single = await exchange(await codeFor("us", "client-a", undefined, {}, { "api_key.us": keys.us, "api_key.eu": "" }));
     expect(single.status).toBe(200);
-    expect(await (await introspect((await single.json()).access_token)).json()).toMatchObject({ active: true, galaxy_instance: "us" });
+    expect(await (await introspect((await single.json()).access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ instance: "us", api_key: keys.us }] });
   });
 
   it("invalidates the complete bundle if any allowed site is remapped", async () => {
@@ -340,7 +615,7 @@ describe("durable Galaxy credential broker", () => {
     const access = await (await introspect(issued.access_token)).json();
     expect(identity).toMatchObject({ iss: config.issuer, aud: "client-a", sub: access.sub, nonce: "fixture-oidc-nonce" });
     expect(identity.exp).toBeGreaterThan(Math.floor(Date.now() / 1000));
-    expect(access).toMatchObject({ active: true, galaxy_instance: "us" });
+    expect(access).toMatchObject({ active: true, galaxy_connections: [{ instance: "us" }] });
     expect(JSON.stringify([issued, identity])).not.toMatch(/fixture-.*-key|galaxy_api_key/);
   });
 
@@ -349,8 +624,8 @@ describe("durable Galaxy credential broker", () => {
     const eu = await tokens("eu", "client-b");
     const first = await (await introspect(us.access_token)).json();
     const second = await (await introspect(eu.access_token)).json();
-    expect(first).toMatchObject({ active: true, client_id: "client-a", aud: resource, galaxy_instance: "us", galaxy_api_key: keys.us, galaxy_url: config.instances.us });
-    expect(second).toMatchObject({ active: true, client_id: "client-b", galaxy_instance: "eu", galaxy_api_key: keys.eu });
+    expect(first).toMatchObject({ active: true, client_id: "client-a", aud: resource, galaxy_connections: [{ instance: "us", api_key: keys.us, url: config.instances.us }] });
+    expect(second).toMatchObject({ active: true, client_id: "client-b", galaxy_connections: [{ instance: "eu", api_key: keys.eu }] });
     expect(first.sub).not.toBe(second.sub);
     expect(await (await introspect(us.access_token, "client-a", "")).json()).toEqual({ active: false });
     expect(await (await introspect(us.access_token, "other-confidential", otherClientSecret)).json()).toEqual({ active: false });
@@ -376,7 +651,7 @@ describe("durable Galaxy credential broker", () => {
   });
 
   it("rejects CSRF, wrong origins, missing consent, invalid keys and unapproved instances without calling arbitrary URLs", async () => {
-    for (const changes of [{ csrf: "wrong" }, { consent: "no" }, { instance: "https://attacker.test" }, { api_key: "wrong" }]) {
+    for (const changes of [{ csrf: "wrong" }, { consent: "no" }, { "api_key.us": "wrong" }, { instance: "https://attacker.test" }, { api_key: "wrong" }]) {
       const auth = await authorization();
       const response = await consent(auth, "us", changes);
       expect(response.status).toBe(400);
@@ -419,7 +694,7 @@ describe("durable Galaxy credential broker", () => {
     expect(await (await introspect(first.access_token)).json()).toMatchObject({ active: true });
     expect(apiRequests).toHaveLength(beforeRecovery);
     await broker.close(); broker = await createBroker(config); handler = broker.callback;
-    expect(await (await introspect(first.access_token)).json()).toMatchObject({ active: true, galaxy_api_key: keys.us });
+    expect(await (await introspect(first.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ api_key: keys.us }] });
     const refresh = () => tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: first.refresh_token, resource });
     const refreshed = await refresh();
     expect(refreshed.status).toBe(200);
@@ -427,7 +702,7 @@ describe("durable Galaxy credential broker", () => {
     expect(rotated.refresh_token).not.toBe(first.refresh_token);
     expect((await refresh()).status).toBe(400);
     expect(await (await introspect(rotated.access_token)).json()).toEqual({ active: false });
-    expect(await (await introspect(other.access_token)).json()).toMatchObject({ active: true, galaxy_api_key: keys.eu });
+    expect(await (await introspect(other.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ api_key: keys.eu }] });
     const revoked = await fetch(`${config.issuer}/token/revocation`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: "client-b", token: other.access_token }) });
     expect(revoked.status).toBe(200);
     expect(await (await introspect(other.access_token)).json()).toEqual({ active: false });
@@ -463,6 +738,19 @@ describe("durable Galaxy credential broker", () => {
     expect(refreshed.status).toBe(200);
   });
 
+  it("defaults an omitted native authorization scope without expanding explicit scopes", async () => {
+    const response = await exchange(await codeFor("us", "galaxy-grok-build", undefined, { scope: undefined }));
+    expect(response.status).toBe(200);
+    const issued = await response.json() as Tokens;
+    expect(issued.scope).toBe("galaxy:full");
+    expect(await (await introspect(issued.access_token)).json()).toMatchObject({
+      active: true, client_id: "galaxy-grok-build", galaxy_connections: [{ instance: "us" }],
+    });
+    const explicit = await authorization("client-a", { scope: "openid" });
+    const interaction = await broker.provider.Interaction.find(new URL(explicit.location).pathname.split("/").at(-1)!);
+    expect(interaction?.params.scope).toBe("openid");
+  });
+
   it("rejects expired access-token storage and preserves a valid refresh grant", async () => {
     const issued = await tokens();
     const storedToken = await broker.provider.AccessToken.find(issued.access_token);
@@ -496,7 +784,7 @@ describe("durable Galaxy credential broker", () => {
     const changed = await exchange(await codeFor("eu", "client-a", browser));
     expect(changed.status).toBe(200);
     const changedTokens = await changed.json() as Tokens;
-    expect(await (await introspect(changedTokens.access_token)).json()).toMatchObject({ active: true, galaxy_instance: "eu" });
+    expect(await (await introspect(changedTokens.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ instance: "eu" }] });
     const auth = await authorization("client-a", { response_mode: "form_post" });
     const post = await resume(auth, await consent(auth));
     expect(post.status).toBe(200);
@@ -522,9 +810,9 @@ describe("durable Galaxy credential broker", () => {
       const consumed = await Promise.allSettled([adapter.consume(id), adapter.consume(id)]);
       expect(consumed.filter(result => result.status === "fulfilled")).toHaveLength(1);
       expect(consumed.filter(result => result.status === "rejected")).toHaveLength(1);
-      await store.saveCredential(id, { accountId: `fixture-${id}`, clientId: "client-a", instance: "us", audience: resource, apiKey: keys.us, baseUrl: config.instances.us! }, Date.now() + 60000);
-      await expect(store.saveCredential(id, { accountId: "other", clientId: "client-a", instance: "eu", audience: resource, apiKey: keys.eu, baseUrl: config.instances.eu! }, Date.now() + 60000)).rejects.toThrow();
-      expect(await store.credential(id)).toMatchObject({ apiKey: keys.us, instance: "us" });
+      await store.saveCredential(id, { accountId: `fixture-${id}`, clientId: "client-a", instance: "us", audience: resource, connections: [{ instance: "us", apiKey: keys.us, baseUrl: config.instances.us! }] }, Date.now() + 60000);
+      await expect(store.saveCredential(id, { accountId: "other", clientId: "client-a", instance: "eu", audience: resource, connections: [{ instance: "eu", apiKey: keys.eu, baseUrl: config.instances.eu! }] }, Date.now() + 60000)).rejects.toThrow();
+      expect(await store.credential(id)).toMatchObject({ instance: "us", connections: [{ instance: "us" }] });
       const encrypted = await database.query<{ grant_id: string; payload: Buffer }>("SELECT grant_id,payload FROM galaxy_broker_credentials WHERE account_id=$1", [`fixture-${id}`]);
       expect(encrypted.rows).toHaveLength(1);
       const stored = encrypted.rows[0]!;

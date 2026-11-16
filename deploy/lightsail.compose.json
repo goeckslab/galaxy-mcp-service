@@ -7,7 +7,8 @@
       "ports": ["80:80", "443:443"],
       "environment": {
         "MCP_HOST": "${MCP_HOST:?Set the owned MCP hostname}",
-        "BROKER_HOST": "${BROKER_HOST:?Set the owned broker hostname}"
+        "LEGACY_MCP_HOST": "${LEGACY_MCP_HOST:?Set the original MCP hostname}",
+        "LEGACY_BROKER_HOST": "${LEGACY_BROKER_HOST:?Set the original broker hostname}"
       },
       "volumes": [
         "./Caddyfile:/etc/caddy/Caddyfile:ro",
@@ -15,7 +16,7 @@
         "caddy-config:/config"
       ],
       "networks": {
-        "app": { "aliases": ["${BROKER_HOST:?Set the owned broker hostname}"] }
+        "app": { "aliases": ["${MCP_HOST:?Set the owned MCP hostname}", "${LEGACY_BROKER_HOST:?Set the original broker hostname}"] }
       },
       "read_only": true,
       "tmpfs": ["/tmp"],
@@ -35,7 +36,7 @@
         "HOST": "0.0.0.0",
         "PORT": "8080",
         "PUBLIC_BASE_URL": "https://${MCP_HOST:?Set the owned MCP hostname}",
-        "OAUTH_METADATA_URL": "https://${BROKER_HOST:?Set the owned broker hostname}/.well-known/oauth-authorization-server",
+        "OAUTH_METADATA_URL": "https://${MCP_HOST:?Set the owned MCP hostname}/.well-known/oauth-authorization-server",
         "OAUTH_INTROSPECTION_CLIENT_ID": "galaxy-mcp-resource-server",
         "OAUTH_INTROSPECTION_CLIENT_SECRET": "${BROKER_RESOURCE_CLIENT_SECRET:?Set the persistent resource-client secret}",
         "GALAXY_INSTANCES_JSON": "${GALAXY_INSTANCES_JSON:?Set the approved Galaxy instance map}"
@@ -61,7 +62,7 @@
         "NODE_ENV": "production",
         "HOST": "0.0.0.0",
         "PORT": "8080",
-        "BROKER_ISSUER": "https://${BROKER_HOST:?Set the owned broker hostname}",
+        "BROKER_ISSUER": "https://${MCP_HOST:?Set the owned MCP hostname}",
         "BROKER_RESOURCE": "https://${MCP_HOST:?Set the owned MCP hostname}/mcp",
         "BROKER_TRUST_PROXY": "1",
         "BROKER_DATABASE_URL": "postgresql://galaxy_broker:${POSTGRES_PASSWORD:?Set a persistent URL-safe database password}@postgres:5432/galaxy_broker",
@@ -81,6 +82,24 @@
       "security_opt": ["no-new-privileges:true"],
       "mem_limit": "512m",
       "logging": { "driver": "local", "options": { "max-size": "10m", "max-file": "3" } }
+    },
+    "legacy-mcp": {
+      "extends": { "service": "mcp" },
+      "environment": {
+        "PUBLIC_BASE_URL": "https://${LEGACY_MCP_HOST:?Set the original MCP hostname}",
+        "OAUTH_METADATA_URL": "https://${LEGACY_BROKER_HOST:?Set the original broker hostname}/.well-known/oauth-authorization-server"
+      },
+      "depends_on": {
+        "legacy-broker": { "condition": "service_healthy" },
+        "proxy": { "condition": "service_started" }
+      }
+    },
+    "legacy-broker": {
+      "extends": { "service": "broker" },
+      "environment": {
+        "BROKER_ISSUER": "https://${LEGACY_BROKER_HOST:?Set the original broker hostname}",
+        "BROKER_RESOURCE": "https://${LEGACY_MCP_HOST:?Set the original MCP hostname}/mcp"
+      }
     },
     "postgres": {
       "image": "postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",

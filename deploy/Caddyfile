@@ -9,10 +9,23 @@
 	}
 }
 
+# MCP and its OAuth broker share one hostname; the broker owns the authorization paths.
 {$MCP_HOST} {
-	reverse_proxy mcp:8080
+	@broker path /.well-known/openid-configuration /.well-known/oauth-authorization-server /auth /auth/* /token /token/* /jwks /request /session/* /interaction/* /connections /connections/* /management/* /events/*
+	handle @broker {
+		reverse_proxy broker:8080
+	}
+	handle {
+		reverse_proxy mcp:8080
+	}
 }
 
-{$BROKER_HOST} {
-	reverse_proxy broker:8080
+# The original two-hostname deployment keeps serving existing connections.
+# Remove these blocks together with the legacy-* services.
+{$LEGACY_MCP_HOST} {
+	reverse_proxy legacy-mcp:8080
+}
+
+{$LEGACY_BROKER_HOST} {
+	reverse_proxy legacy-broker:8080
 }

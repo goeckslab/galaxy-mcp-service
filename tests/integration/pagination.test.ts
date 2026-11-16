@@ -55,7 +55,7 @@ it.each(["https://usegalaxy.org", "https://usegalaxy.eu", "https://galaxy.exampl
       baseUrl, apiKey: "pagination-test-key",
       fetchImpl: async (input, init) => {
         const url = new URL(new Request(input, init).url);
-        queries.push(url.searchParams);
+        if (url.pathname.endsWith("/contents")) queries.push(url.searchParams);
         if (url.pathname.endsWith("/api/histories") || url.pathname.includes("unavailable")) {
           return Response.json({ err_msg: "Temporarily unavailable" }, { status: 503 });
         }
@@ -164,8 +164,8 @@ it("finds generic reports beyond page one with compact candidates, bounded looku
     const displayedHistory = await client.callTool({ name: "show_history", arguments: { historyId: "small" } });
     expect(displayedHistory.structuredContent).toHaveProperty("presentation.display_status", "unconfirmed");
     expect(JSON.stringify(report)).not.toContain("server-only");
-    const denied = await client.callTool({ name: "show_dataset", arguments: { datasetId: "raw" } });
-    expect(denied.isError).toBe(true);
+    const rawPreview = await client.callTool({ name: "show_dataset", arguments: { datasetId: "raw" } });
+    expect(rawPreview.structuredContent).toMatchObject({ success: true, view: "dataset", data: [{ extension: "fastqsanger" }] });
     expect(requests.at(-1)).toBe("/api/datasets/raw");
   } finally {
     await client.close();

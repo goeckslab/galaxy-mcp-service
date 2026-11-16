@@ -18,6 +18,8 @@ import {
 import type { UniversalAuth } from "./auth.js";
 import { createGalaxyMcpHandler, type GalaxyConnection } from "./mcp.js";
 import { publicPage, publicPageCsp, publicPagePaths } from "./public-pages.js";
+import { startRunEvents } from "./events.js";
+import { galaxyIconPng } from "./brand-icon.js";
 
 export interface AppOptions {
   auth?: UniversalAuth;
@@ -62,6 +64,8 @@ export function createApp(options: AppOptions = {}) {
   const log = options.log ?? console.log;
   const allowedHosts = allowedHostnames(options.publicBaseUrl);
   const publicOrigin = options.publicBaseUrl?.trim() ? new URL(options.publicBaseUrl) : undefined;
+  const stopEvents = options.auth?.eventRequest ? startRunEvents(options.auth.eventRequest,
+    () => metadataLog({ timestamp: new Date().toISOString(), event: "run_events_unavailable" }, log)) : undefined;
   const mcpHandler = createGalaxyMcpHandler(
     (error) =>
       metadataLog(
@@ -75,6 +79,9 @@ export function createApp(options: AppOptions = {}) {
       ),
     options.galaxy,
     publicOrigin?.protocol === "https:" ? publicOrigin.origin : undefined,
+    options.auth?.createManagementLink,
+    options.auth?.eventRequest,
+    options.auth && new URL(options.auth.oauthMetadata.issuer).origin,
   );
   const nodeHandler = toNodeHandler({
     async fetch(request, handlerOptions) {
@@ -120,6 +127,10 @@ export function createApp(options: AppOptions = {}) {
     allowedHosts,
     jsonLimit: "256kb",
   }).disable("x-powered-by"));
+
+  app.get(["/favicon.ico", "/favicon.png"], (_req, res) => {
+    res.set({ "Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff" }).type("png").send(galaxyIconPng);
+  });
 
   app.get(publicPagePaths, (req, res) => {
     const page = publicPage(req.path);
@@ -216,6 +227,7 @@ export function createApp(options: AppOptions = {}) {
     app,
     mcpHandler,
     async close(): Promise<void> {
+      await stopEvents?.();
       await mcpHandler.close();
     },
   };

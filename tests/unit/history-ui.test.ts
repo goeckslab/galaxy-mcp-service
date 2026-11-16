@@ -6,7 +6,9 @@ import { HISTORY_SUMMARY_URI, registerHistorySummaryResource } from "../../apps/
 class Element {
   children: Element[] = [];
   dataset: Record<string, string> = {};
-  style: Record<string, string> = {};
+  style: Record<string, unknown> & { setProperty(name: string, value: string): void } = {
+    setProperty(name, value) { this[name] = value; },
+  };
   attrs = new Map<string, string>();
   listeners = new Map<string, (event: { preventDefault: () => void }) => unknown>();
   hidden = false;
@@ -16,7 +18,9 @@ class Element {
   className = "";
   tabIndex = -1;
   open = false;
+  value = "";
   namespaceURI = "http://www.w3.org/1999/xhtml";
+  parentElement?: Element;
   private text = "";
   constructor(public tagName: string) {}
   get nodeType() { return this.tagName === "#text" ? 3 : 1; }
@@ -40,9 +44,9 @@ class Element {
   setAttribute(name: string, value: string) { this.attrs.set(name, value); }
   getAttribute(name: string) { return this.attrs.get(name) ?? null; }
   removeAttribute(name: string) { this.attrs.delete(name); }
-  append(...children: Element[]) { this.children.push(...children); }
-  prepend(...children: Element[]) { this.children.unshift(...children); }
-  replaceChildren(...children: Element[]) { this.text = ""; this.children = children; }
+  append(...children: Element[]) { for (const child of children) child.parentElement = this; this.children.push(...children); }
+  prepend(...children: Element[]) { for (const child of children) child.parentElement = this; this.children.unshift(...children); }
+  replaceChildren(...children: Element[]) { this.text = ""; this.children = []; this.append(...children); }
   addEventListener(name: string, listener: (event: { preventDefault: () => void }) => unknown) { this.listeners.set(name, listener); }
   click(event = { preventDefault() {} }) { return this.listeners.get("click")?.(event); }
   focus() { this.focused = true; }
@@ -61,7 +65,7 @@ registerHistorySummaryResource({
   registerResource(_name: string, uri: string, _metadata: unknown, read: (uri: URL) => { contents: { text: string }[] }) {
     resources.set(uri, read(new URL(uri)).contents[0]!.text);
   },
-} as unknown as Parameters<typeof registerHistorySummaryResource>[0]);
+} as unknown as Parameters<typeof registerHistorySummaryResource>[0], undefined, "https://mcp.example.org");
 const html = resources.get(HISTORY_SUMMARY_URI)!;
 const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1]!;
 
@@ -145,6 +149,236 @@ const historyResult = { status: "connected", histories: [{ id: "private-history"
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("history result browser", () => {
+  it.each([false, true])("only displays known history and dataset states (standard host=%s)", async standardHost => {
+    const data = [undefined, null, "unknown", "ok", "error"].map((state, index) => ({ ...items(1, index)[0], state, extension: "bam" }));
+    const badges = (node: Element): Element[] => [
+      ...(["state", "status"].includes(node.className) ? [node] : []),
+      ...node.children.flatMap(badges),
+    ];
+    const ui = mount(undefined, {
+      standardHost, initializeResult: { hostCapabilities: { serverTools: {} } },
+      reply: rpc => rpc.params?.name === "get_dataset_details"
+        ? { structuredContent: { success: true, data: { id: rpc.params.arguments?.datasetId, file_ext: "bam", file_size: 64 } } }
+        : { isError: true },
+    });
+    await flush();
+    for (const result of [{ status: "connected", histories: data }, { success: true, data }]) {
+      ui.notify(result);
+      expect(ui.node("histories").children).toHaveLength(5);
+      expect(badges(ui.node("histories")).map(node => node.textContent)).toEqual(["Ready", "Failed"]);
+    }
+    await ui.node("histories").children[3]!.children[0]!.click();
+    await flush();
+    expect(ui.node("detail-body").querySelector("dl")?.children.map(node => node.querySelector("dt")?.textContent)).toEqual(["Format", "Size"]);
+  });
+
+  it("previews PDF pages, images, tables and JSON in one viewer, and falls back to Galaxy peek for binary data", async () => {
+    const galaxy = { instance: "us", url: "https://usegalaxy.org" };
+    const formats = ["pdf", "png", "csv", "json", "bam"];
+    let changed = false;
+    const ui = mount({ success: true, galaxy, data: formats.map((extension, index) => ({ ...items(1, index)[0], extension })) }, {
+      initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } },
+      reply: rpc => {
+        const id = String(rpc.params?.arguments?.datasetId);
+        const format = formats[Number(id.split("-").at(-1))];
+        if (rpc.params?.name === "get_dataset_details") return { structuredContent: { success: true, galaxy, data: { id, file_ext: "bam", state: "ok", peek: "Galaxy BAM summary" } } };
+        if (format === "bam") return { isError: true };
+        return {
+          structuredContent: { galaxy, dataset_id: id, url: galaxy.url + "/datasets/" + id + "/display", name: format + " result", extension: format,
+            preview_kind: format === "png" ? "image" : format, source_sha256: (changed ? "b" : "a").repeat(64),
+            text: format === "png" ? "" : format === "json" ? '{"sample":"<script>not executable</script>","reads":900}' : "Source text", page: Number(rpc.params?.arguments?.page || 1), page_count: format === "pdf" ? 2 : 1,
+          },
+          ...(format === "pdf" || format === "png" ? { content: [{ type: "image", mimeType: "image/png", data: "aGVsbG8=" }] } : {}),
+          ...(format === "csv" ? { _meta: { preview: { kind: "table", rows: [["sample", "reads"], ["<script>literal cell</script>", "900"]] } } } : {}),
+        };
+      }, htmlText: "Galaxy BAM summary",
+    });
+    await flush();
+    expect(ui.node("histories").children.every(row => row.dataset.clickable === "true")).toBe(true);
+    for (const [index, format] of formats.entries()) {
+      await ui.node("histories").children[index]!.children[0]!.click();
+      await flush();
+      expect(ui.node("report-link").hidden).toBe(false);
+      if (format === "pdf") {
+        expect(ui.node("detail-message").textContent).toBe("Page 1 of 2");
+        const zoom = ui.node("detail-body").children[0]!;
+        const image = ui.node("detail-body").querySelector("img")!;
+        expect(zoom.textContent).toBe("Actual size");
+        await zoom.click();
+        expect(image.dataset.actual).toBe("true");
+        expect(zoom.textContent).toBe("Fit page");
+        await zoom.click();
+        expect(image.dataset.actual).toBe("false");
+        const scroller = image.parentElement!;
+        scroller.getBoundingClientRect = () => ({ height: 150 });
+        ui.hostContext({ containerDimensions: { maxHeight: 900 } });
+        expect(scroller.style["--figure-height"]).toBe("550px");
+        ui.hostContext({ theme: "light" });
+        expect(scroller.style["--figure-height"]).toBe("550px");
+        ui.hostContext({ containerDimensions: { height: 500 } });
+        expect(scroller.style["--figure-height"]).toBe("150px");
+        ui.hostContext({ containerDimensions: {} });
+        expect(scroller.style["--figure-height"]).toBe("620px");
+        await ui.node("detail-body").children.at(-1)!.children[0]!.click();
+        expect(ui.node("detail-message").textContent).toBe("Page 2 of 2");
+        const previous = ui.node("detail-body").children.at(-1)!.children[0]!;
+        expect(previous.textContent).toBe("Previous page");
+        await previous.click();
+        expect(ui.node("detail-message").textContent).toBe("Page 1 of 2");
+        const lastImage = ui.node("detail-body").querySelector("img");
+        changed = true;
+        await ui.node("detail-body").children.at(-1)!.children[0]!.click();
+        expect(ui.node("detail-message").textContent).toContain("last loaded preview is retained");
+        expect(ui.node("detail-body").querySelector("img")).toBe(lastImage);
+        changed = false;
+      } else if (format === "png") {
+        expect(ui.node("detail-body").querySelector("img")?.attrs.get("src")).toContain("data:image/png;base64,");
+        expect(ui.node("detail-body").querySelector("pre")).toBeUndefined();
+      }
+      else if (format === "csv") expect(ui.node("detail-body").querySelector("table")?.textContent).toContain("<script>literal cell</script>");
+      else if (format === "json") expect(ui.node("detail-body").querySelector("pre")?.textContent).toContain('\n  "reads": 900');
+      else expect(ui.node("detail-body").textContent).toContain("Galaxy BAM summary");
+      expect(ui.node("detail-body").querySelector("script")).toBeUndefined();
+      await ui.node("detail-close").click();
+    }
+    expect(ui.calls.filter(call => call.method === "tools/call").every(call => ["read_dataset_report", "get_dataset_details"].includes(call.params?.name || ""))).toBe(true);
+    expect(ui.calls.filter(call => call.method === "tools/call").every(call => call.params?.arguments?.instance === "us")).toBe(true);
+    ui.teardown();
+  });
+
+  it("does not rerender a workspace or echo unchanged size when the host replays its result", async () => {
+    const us = { instance: "us", url: "https://usegalaxy.org" };
+    const result = {
+      view: "workspace", connections: [us], presentation: { view_id: "workspace-1" },
+      initial: { ...historyResult, galaxy: us },
+    };
+    const ui = mount(result, { initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } } });
+    await flush();
+    const row = ui.node("histories").children[0];
+    const callCount = ui.calls.length;
+    expect(row?.textContent).toContain("RNA analysis");
+    for (let replay = 0; replay < 3; replay++) {
+      ui.globals({ toolOutput: result, theme: "dark" });
+      ui.notify(result);
+      ui.resize();
+    }
+    expect(ui.node("histories").children[0]).toBe(row);
+    expect(ui.calls).toHaveLength(callCount);
+    expect(ui.root.style.colorScheme).toBe("dark");
+    ui.notify({ ...result, presentation: { view_id: "workspace-2" }, initial: { ...result.initial, histories: [{ id: "new-history", name: "New analysis" }] } });
+    expect(ui.node("histories").textContent).toContain("New analysis");
+    ui.root.getBoundingClientRect = () => ({ height: 650 });
+    ui.resize();
+    expect(ui.calls.at(-1)?.params).toEqual({ height: 650 });
+  });
+
+  it("reuses the workspace without extra cards, binds site selection, and rejects stale cross-site results", async () => {
+    const us = { instance: "us", url: "https://usegalaxy.org" };
+    const eu = { instance: "eu", url: "https://usegalaxy.eu" };
+    const ui = mount({ view: "workspace", connections: [us, eu], management_available: true }, {
+      initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } },
+    });
+    await flush();
+    expect(ui.node("workspace-nav").hidden).toBe(false);
+    expect(ui.node("workspace-site").children.map(value => value.textContent)).toEqual(["Choose a Galaxy site", "us · usegalaxy.org", "eu · usegalaxy.eu"]);
+    expect(ui.node("histories").children).toHaveLength(0);
+    ui.node("workspace-site").value = "us";
+    const first = ui.node("workspace-site").listeners.get("change")!({ preventDefault() {} });
+    const usRead = ui.calls.find(call => call.params?.name === "get_histories")!;
+    ui.node("workspace-site").value = "eu";
+    const second = ui.node("workspace-site").listeners.get("change")!({ preventDefault() {} });
+    const euRead = ui.calls.filter(call => call.params?.name === "get_histories").at(-1)!;
+    expect(euRead.params?.arguments).toEqual({ instance: "eu", limit: 5, offset: 0 });
+    ui.reply(euRead, { structuredContent: { ...historyResult, galaxy: eu } });
+    await second;
+    ui.reply(usRead, { structuredContent: { ...historyResult, galaxy: us, histories: [{ id: "old-us", name: "Stale US history", state: "ok" }] } });
+    await first;
+    expect(ui.node("histories").textContent).toContain("RNA analysis");
+    expect(ui.node("histories").textContent).not.toContain("Stale US");
+    const open = ui.node("histories").children[0]!.children[0]!.click();
+    const contents = ui.calls.find(call => call.params?.name === "get_history_contents")!;
+    expect(contents.params?.arguments?.instance).toBe("eu");
+    ui.reply(contents, { structuredContent: { success: true, galaxy: us, data: items(1) } });
+    await open;
+    expect(ui.node("message").textContent).toContain("could not be loaded");
+    expect(ui.calls.filter(call => call.method === "tools/call").every(call => call.params?.name?.startsWith("get_"))).toBe(true);
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ galaxy: eu });
+    ui.teardown();
+    const selected = mount({ view: "workspace", connections: [eu], management_available: false,
+      presentation: { view_id: "workspace-run" }, initial: { success: true, galaxy: eu,
+        run: { kind: "workflow", id: "run-1", name: "RNA workflow", state: "completed", checked_at: new Date().toISOString() } },
+    }, { initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } } });
+    await flush();
+    expect(selected.node("workspace-site").value).toBe("eu");
+    expect(selected.node("run-panel").hidden).toBe(false);
+    expect(selected.node("manage-connections").hidden).toBe(true);
+    expect(selected.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({
+      view: "run_status", view_id: "workspace-run", galaxy: eu, kind: "workflow", run_id: "run-1", name: "RNA workflow",
+    });
+    selected.teardown();
+  });
+  it.each([false, true])("keeps the workspace preview and selection while toggling and paging its file list (standard host=%s)", async standardHost => {
+    const us = { instance: "us", url: "https://usegalaxy.org" };
+    const eu = { instance: "eu", url: "https://usegalaxy.eu" };
+    const result = { view: "workspace", connections: [us, eu], initial: { success: true, galaxy: us,
+      history_id: "private-history", data: items(5), pagination: { offset: 0, returned: 5, next_offset: 5, has_more: true } } };
+    const ui = mount(standardHost ? undefined : result, {
+      standardHost, initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } },
+      reply: rpc => ({ structuredContent: rpc.params?.name === "read_dataset_report"
+        ? { galaxy: us, dataset_id: "private-dataset-0", name: "Result 0", extension: "pdf", preview_kind: "pdf",
+          text: "Report text", source_sha256: "a".repeat(64), page: Number(rpc.params?.arguments?.page || 1), page_count: 2 }
+        : rpc.params?.name === "get_history_contents"
+          ? { success: true, galaxy: us, data: items(5, 5), pagination: { offset: 5, returned: 5, has_more: false } }
+          : { ...historyResult, galaxy: eu },
+        ...(rpc.params?.name === "read_dataset_report" ? { content: [{ type: "image", mimeType: "image/png", data: "aGVsbG8=" }] } : {}),
+      }),
+    });
+    await flush();
+    if (standardHost) ui.notify(result);
+    expect(ui.node("galaxy-card").className).toBe("card workspace");
+    expect(ui.node("histories").children).toHaveLength(5);
+    await ui.node("histories").children[0]!.children[0]!.click();
+    const image = ui.node("detail-body").querySelector("img");
+    const raw = ui.node("detail-body").querySelector("details")!;
+    raw.open = true;
+    expect(ui.node("file-list-panel").hidden).toBe(true);
+    expect(ui.node("workspace-file-list").textContent).toBe("Show file list");
+    const callCount = ui.calls.filter(call => call.method === "tools/call").length;
+    await ui.node("workspace-file-list").click();
+    expect(ui.node("file-list-panel").hidden).toBe(false);
+    expect(ui.node("workspace-file-list").textContent).toBe("Hide file list");
+    expect(ui.node("workspace-file-list").getAttribute("aria-expanded")).toBe("true");
+    expect(ui.calls.filter(call => call.method === "tools/call")).toHaveLength(callCount);
+    await ui.node("show-more").click(); // remote page
+    expect(ui.node("histories").children).toHaveLength(10);
+    await ui.node("show-less").click();
+    expect(ui.node("histories").children).toHaveLength(5);
+    await ui.node("show-more").click(); // cached page
+    expect(ui.calls.filter(call => call.params?.name === "get_history_contents")).toHaveLength(1);
+    expect(ui.node("histories").children[0]!.children[0]!.getAttribute("aria-expanded")).toBe("true");
+    expect(ui.node("dataset-detail").hidden).toBe(false);
+    expect(ui.node("detail-body").querySelector("img")).toBe(image);
+    expect(ui.node("detail-body").querySelector("details")).toBe(raw);
+    expect(raw.open).toBe(true);
+    expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ view: "report", dataset_id: "private-dataset-0" });
+    await ui.node("detail-body").children.at(-1)!.children[0]!.click();
+    expect(ui.node("detail-message").textContent).toBe("Page 2 of 2");
+    expect(ui.node("histories").children[0]!.children[0]!.getAttribute("aria-expanded")).toBe("true");
+    await ui.node("workspace-file-list").click();
+    expect(ui.node("file-list-panel").hidden).toBe(true);
+    ui.node("workspace-site").value = "eu";
+    await ui.node("workspace-site").listeners.get("change")!({ preventDefault() {} });
+    expect(ui.node("dataset-detail").hidden).toBe(true);
+    expect(ui.node("detail-body").children).toHaveLength(0);
+    expect(ui.node("histories").textContent).toContain("RNA analysis");
+    expect(ui.calls.filter(call => call.method === "tools/call").at(-1)?.params?.arguments?.instance).toBe("eu");
+    ui.notify({ ...historyResult, galaxy: us, presentation: { view_id: "compact-card" } });
+    expect(ui.node("galaxy-card").className).toBe("card");
+    expect(ui.node("workspace-nav").hidden).toBe(true);
+    expect(ui.node("workspace-file-list").hidden).toBe(true);
+    ui.teardown();
+  });
+
   it("loads remote histories five at a time, contracts locally and preserves source and navigation", async () => {
     const galaxy = { instance: "eu", url: "https://usegalaxy.eu" };
     const first = { status: "connected", galaxy, histories: items(5), pagination: { offset: 0, next_offset: 5, has_more: true } };
@@ -205,7 +439,7 @@ describe("history result browser", () => {
     const sources = [{ instance: "us", url: "https://us.example.test" }, { instance: "eu", url: "https://eu.example.test" }];
     const cards = sources.map(galaxy => mount({ ...historyResult, galaxy }, { reply: rpc => ({ structuredContent: {
       galaxy, success: true, history_id: "private-history", data: items(5),
-      ...(rpc.params?.name === "get_dataset_text" ? { name: "Result", text: galaxy.instance + " evidence" }
+      ...(rpc.params?.name === "read_dataset_report" ? { name: "Result", text: galaxy.instance + " evidence" }
         : { pagination: { offset: 0, next_offset: 5, has_more: true } }),
     } }) }));
     await flush();
@@ -214,7 +448,7 @@ describe("history result browser", () => {
       await ui.node("histories").children[0]!.children[0]!.click();
       await ui.node("show-more").click();
       await ui.node("histories").children[0]!.children[0]!.click();
-      expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params?.name)).toEqual(["get_history_contents", "get_history_contents", "get_dataset_text"]);
+      expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params?.name)).toEqual(["get_history_contents", "get_history_contents", "read_dataset_report"]);
       expect(ui.calls.filter(call => call.method === "tools/call").every(call => call.params?.arguments?.instance === sources[index]!.instance)).toBe(true);
       ui.cache(); ui.restore();
       expect(ui.node("instance").textContent).toContain(sources[index]!.instance);
@@ -276,6 +510,15 @@ describe("history result browser", () => {
     expect(ui.node("history-link").getAttribute("href")).toBeNull();
     expect(ui.node("history-link-note").hidden).toBe(true);
     expect(html).toContain('target="_blank" rel="noopener noreferrer"');
+  });
+
+  it("names the history in the title when opened straight on its contents", async () => {
+    const ui = mount({ success: true, data: items(1), history_id: "h1", history_name: "RNA-seq: liver vs kidney" });
+    await flush();
+    expect(ui.node("title").textContent).toBe("RNA-seq: liver vs kidney");
+    const unnamed = mount({ success: true, data: items(1), history_id: "h1" });
+    await flush();
+    expect(unnamed.node("title").textContent).toBe("History contents");
   });
 
   it.each([undefined, "javascript:alert(1)", "https://key:secret@example.test/histories/view?id=h1", "https://example.test/histories/view?id=other"])("does not expose a missing, unsafe or mismatched history link: %s", async history_url => {
@@ -380,13 +623,16 @@ describe("history result browser", () => {
     });
     await flush();
     const call = ui.calls.find(call => call.method === "tools/call")!;
-    expect(call.params?.name).toBe(extension === "html" ? "get_dataset_html" : "get_dataset_text");
+    expect(call.params?.name).toBe(extension === "html" ? "get_dataset_html" : "read_dataset_report");
     expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ report_status: "loading", display_verified: false });
     if (failure === "timeout") ui.expire(45000);
     else ui.reply(call, failure === "error" ? { isError: true } : { structuredContent: { name: "HTML result" } });
     await flush();
-    expect(ui.node("detail-message").textContent).toContain("could not be loaded");
-    expect(ui.node("detail-body").children).toHaveLength(0);
+    expect(ui.node("detail-message").textContent).toMatch(/could not be loaded|Full-file preview is unavailable/);
+    expect(ui.node("detail-body").textContent).toContain("not the full file");
+    const metadataRead = ui.calls.find(call => call.params?.name === "get_dataset_details");
+    if (metadataRead) ui.reply(metadataRead, { isError: true });
+    await flush();
     expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({ report_status: "load_failed", display_verified: false });
     await ui.node("detail-close").click();
     const button = ui.node("histories").children[0]!.children[0]!;
@@ -399,10 +645,9 @@ describe("history result browser", () => {
     expect(ui.calls.filter(call => call.method === "ui/update-model-context").some(call => (call.params?.structuredContent as { display_verified?: boolean })?.display_verified === true)).toBe(false);
   });
 
-  it("serves every published URI and reveals every returned item without inventing a total", async () => {
-    expect(resources.size).toBe(18);
+  it("serves only the current UI resource and reveals every returned item without inventing a total", async () => {
+    expect([...resources.keys()]).toEqual([HISTORY_SUMMARY_URI]);
     expect(html).toContain('alt="Galaxy" width="597" height="451" src="data:image/png;base64,');
-    expect([...resources.values()].every(value => value === html)).toBe(true);
     const ui = mount({ success: true, data: items(25) });
     await flush();
     expect(ui.node("histories").children).toHaveLength(5);
@@ -426,6 +671,41 @@ describe("history result browser", () => {
     expect(histories.node("show-more").textContent).toBe("Load more");
   });
 
+  it("opens a one-time connection manager without leaking the card's Galaxy instance", async () => {
+    const ticket = "t".repeat(43);
+    const url = `https://mcp.example.org/connections/${ticket}`;
+    const ui = mount({ ...historyResult, galaxy: { instance: "eu", url: "https://usegalaxy.eu" } }, {
+      initializeResult: { hostCapabilities: { serverTools: {}, openLinks: {} } },
+      reply: () => ({ structuredContent: { url, expires_in: 300 } }),
+    });
+    await flush();
+    expect(ui.node("manage-connections").hidden).toBe(false);
+    const opening = ui.node("manage-connections").click();
+    await flush();
+    expect(ui.calls.find(call => call.params?.name === "get_connection_management_link")?.params).toEqual({
+      name: "get_connection_management_link", arguments: {},
+    });
+    const openLink = ui.calls.find(call => call.method === "ui/open-link")!;
+    expect(openLink.params).toEqual({ url });
+    ui.reply(openLink, {});
+    await opening;
+    expect(ui.node("manage-connections").disabled).toBe(false);
+    expect(ui.pending()).toBe(0);
+  });
+
+  it("does not open a connection-management link on another origin", async () => {
+    const url = `https://auth.example.org/connections/${"t".repeat(43)}`;
+    const ui = mount(historyResult, {
+      initializeResult: { hostCapabilities: { serverTools: {}, openLinks: {} } },
+      reply: () => ({ structuredContent: { url, expires_in: 300 } }),
+    });
+    await flush();
+    await ui.node("manage-connections").click();
+    await flush();
+    expect(ui.calls.some(call => call.method === "ui/open-link")).toBe(false);
+    expect(ui.node("manage-connections").disabled).toBe(false);
+  });
+
   it("navigates a history, appends a remote page, and ignores host replay during browsing", async () => {
     const ui = mount(historyResult, { reply: rpc => {
       const offset = Number(rpc.params?.arguments?.offset);
@@ -440,6 +720,7 @@ describe("history result browser", () => {
     ui.globals({ toolOutput: historyResult, theme: "dark" });
     expect(ui.node("title").textContent).toBe("History contents");
     expect(ui.root.style.colorScheme).toBe("dark");
+    ui.root.getBoundingClientRect = () => ({ height: 650 });
     ui.resize();
     expect(ui.calls.at(-1)?.method).toBe("ui/notifications/size-changed");
     await ui.node("show-more").click();
@@ -776,7 +1057,7 @@ describe("run status card", () => {
     expect(ui.calls.filter(call => call.method === "tools/call").map(call => call.params)).toEqual([
       { name: "get_run_status", arguments: { kind: "tool", runId: "private-run" } },
       { name: "get_history_contents", arguments: { historyId: "private-history", limit: 5, offset: 0 } },
-      { name: "get_dataset_text", arguments: { datasetId: "private-dataset-0" } },
+      { name: "read_dataset_report", arguments: { datasetId: "private-dataset-0", page: 1, offset: 0, includeImage: true } },
     ]);
   });
 

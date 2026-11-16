@@ -33,18 +33,30 @@ describe("HTTP MCP service", () => {
       const html = await response.text();
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/html");
-      expect(response.headers.get("content-security-policy")).toMatch(/default-src 'none'; style-src 'sha256-/);
+      expect(response.headers.get("content-security-policy")).toMatch(/default-src 'none'; img-src 'self'; style-src 'sha256-/);
       expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
       expect(response.headers.get("referrer-policy")).toBe("no-referrer");
       expect(html).toContain('<a href="/support">Support and contact</a>');
+      expect(html).toContain('<link rel="icon" type="image/png" href="/favicon.png">');
       expect(html).not.toMatch(/mailto:|[\w.+-]+@gmail\.com/i);
       expect(html).not.toMatch(/<script|<form|<iframe|not-for-the-page|\/Users\//i);
     }
     expect((await fetch(`${baseUrl}/constructor`)).status).toBe(404);
+    const icons = await Promise.all(["/favicon.ico", "/favicon.png"].map(path => fetch(`${baseUrl}${path}`)));
+    for (const icon of icons) {
+      expect(icon.status).toBe(200);
+      expect(icon.headers.get("content-type")).toBe("image/png");
+    }
+    const [ico, png] = await Promise.all(icons.map(async icon => Buffer.from(await icon.arrayBuffer())));
+    expect(ico!.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    expect(ico).toEqual(png);
     const home = await (await fetch(`${baseUrl}/`)).text();
     expect(home).toContain('href="https://usegalaxy.org.au"');
     expect(home).toContain('href="https://usegalaxy.fr"');
     expect(home).toContain('href="https://usegalaxy.ca"');
+    expect(home).toContain('href="https://mcp.galaxyproject.org/connections"');
+    expect(home).toContain("<code>https://mcp.galaxyproject.org/mcp</code>");
+    expect(home).toContain("ask naturally to remove a site, rotate a key or disconnect Galaxy");
     expect(home).not.toContain("one selected instance per authorization");
     const support = await (await fetch(`${baseUrl}/support`)).text();
     expect(support).toContain('id="request-site"');
@@ -58,6 +70,11 @@ describe("HTTP MCP service", () => {
     expect(privacy).toContain("not shown to other respondents");
     expect(support).toContain("Sending a request does not automatically add the site or authorize an account");
     expect(support).toContain("Do not send API keys");
+    expect(support).toContain("manage my Galaxy connections");
+    expect(privacy).toContain("private five-minute link");
+    expect(privacy).toContain("does not use a browser login cookie");
+    expect(privacy).toContain("Optional analysis notifications");
+    expect(privacy).toContain("Each subscription lasts at most 24 hours");
     const foreignHostStatus = await new Promise<number | undefined>((resolve, reject) => {
       get(`${baseUrl}/privacy`, { headers: { host: "attacker.example" } }, (response) => {
         response.resume();
@@ -70,6 +87,7 @@ describe("HTTP MCP service", () => {
   it("routes Universal OAuth users to their allowlisted Galaxy instance", async () => {
     const resource = "http://127.0.0.1/mcp";
     const issuer = "https://auth.example.test";
+    const managementTicket = "t".repeat(43);
     const introspectionUrl = `${issuer}/oauth/introspect`;
     const brokerSecret = "integration-broker-secret";
     const calls: string[] = [];
@@ -109,12 +127,18 @@ describe("HTTP MCP service", () => {
           aud: token === "wrong-audience" ? "https://other.example.test/mcp" : resource,
           client_id: "chatgpt",
           exp: Math.floor(Date.now() / 1000) + (token === "expired" || (expired && token === "token-us") ? -60 : 60),
-          galaxy_api_key: `key-${instance}`,
-          galaxy_instance: instance,
+          galaxy_connections: [{ instance, api_key: `key-${instance}`, url: `https://${instance}.example.test` }],
           iss: issuer,
           scope: token === "missing-scope" ? "profile" : "galaxy:full",
           sub: `user-${instance}`,
         });
+      }
+      if (request.method === "POST" && url.href === `${issuer}/management/ticket`) {
+        expect(request.headers.get("authorization")).toBe(
+          `Basic ${Buffer.from(`broker-client:${brokerSecret}`).toString("base64")}`,
+        );
+        expect(new URLSearchParams(await request.text()).get("token")).toBe("token-us");
+        return Response.json({ url: `${issuer}/connections/${managementTicket}`, expires_in: 300 });
       }
       if (request.method === "GET" && url.pathname === "/api/histories" && ["us.example.test", "eu.example.test"].includes(url.host)) {
         const instance = url.host.startsWith("us") ? "us" : "eu";
@@ -186,6 +210,15 @@ describe("HTTP MCP service", () => {
         });
       }));
 
+      const management = modernRequest("tools/call", { name: "get_connection_management_link", arguments: {} });
+      management.headers.set("authorization", "Bearer token-us");
+      const managementResponse = await fetch(`${configured.baseUrl}/mcp`, {
+        method: "POST", headers: management.headers, body: JSON.stringify(management.body),
+      });
+      expect(await managementResponse.json()).toMatchObject({ result: { structuredContent: {
+        url: `${issuer}/connections/${managementTicket}`, expires_in: 300,
+      } } });
+
       for (const [token, status] of [
         ["inactive", 401],
         ["token-unknown", 401],
@@ -210,7 +243,8 @@ describe("HTTP MCP service", () => {
         "GET eu.example.test/api/histories",
         "GET us.example.test/api/histories",
       ]);
-      expect(calls.filter((call) => call.endsWith("/oauth/introspect"))).toHaveLength(7);
+      expect(calls.filter((call) => call.endsWith("/oauth/introspect"))).toHaveLength(8);
+      expect(calls.filter((call) => call.endsWith("/management/ticket"))).toHaveLength(1);
       expect(calls[0]).toBe(
         "GET auth.example.test/.well-known/oauth-authorization-server",
       );
@@ -251,6 +285,15 @@ describe("HTTP MCP service", () => {
       expect((await readExistingRun("renewed-us")).status).toBe(200);
       expect((await readExistingRun("token-eu")).status).toBe(401);
       expect(calls.filter(call => !call.includes("auth.example.test")).every(call => call.startsWith("GET "))).toBe(true);
+      // Connection-management links open on the broker's origin, wherever it is hosted.
+      const card = modernRequest("resources/read", { uri: HISTORY_SUMMARY_URI });
+      card.headers.set("authorization", "Bearer renewed-us");
+      card.headers.set("mcp-name", HISTORY_SUMMARY_URI);
+      const read = await (await fetch(`${configured.baseUrl}/mcp`, {
+        method: "POST", headers: card.headers, body: JSON.stringify(card.body),
+      })).json() as { result: { contents: Array<{ text: string; _meta: Record<string, { redirect_domains?: string[] }> }> } };
+      expect(read.result.contents[0]!._meta["openai/widgetCSP"]!.redirect_domains).toEqual([issuer]);
+      expect(read.result.contents[0]!.text).toContain(`const managementOrigin = "${issuer}";`);
       expect([...previousLogs, ...configured.logs].join("\n")).not.toMatch(
         /key-us|key-eu|integration-broker-secret|token-us|token-eu|renewed-us/,
       );
@@ -274,6 +317,7 @@ describe("HTTP MCP service", () => {
     await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
     expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
       "get_galaxy_connections",
+      "show_galaxy",
       "get_histories",
       "show_histories",
       ...productOperations.flatMap(({ name }) => name === "get_history_contents" ? [name, "show_history"] : [name]),
@@ -308,7 +352,7 @@ describe("HTTP MCP service", () => {
       await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
       const instructions = client.getInstructions();
       expect(instructions).toContain("Galaxy tools work without UI.");
-      expect(instructions).toContain("submit analyses once");
+      expect(instructions).toContain("submit once");
       expect(instructions).toContain("get_dataset_text");
       expect(instructions).toContain("read_dataset_report");
       expect(instructions!.length).toBeLessThanOrEqual(512);
@@ -322,19 +366,24 @@ describe("HTTP MCP service", () => {
     }
   });
 
-  it("keeps the ChatGPT origin host-specific for every UI alias without widening network access", async () => {
+  it("keeps the ChatGPT origin host-specific for the current UI resource without widening network access", async () => {
     for (const publicBaseUrl of ["https://MCP.example.test/", "http://localhost", "", "  ", undefined]) {
       const configured = await startTestService(publicBaseUrl === undefined ? {} : { publicBaseUrl });
       const client = new Client({ name: "widget-domain-check", version: "0.1.0" }, { capabilities: {} });
       try {
         await client.connect(new StreamableHTTPClientTransport(new URL(`${configured.baseUrl}/mcp`)));
+        const domain = publicBaseUrl?.startsWith("https:") ? "https://mcp.example.test" : undefined;
+        expect(client.getServerVersion()?.icons).toEqual(domain ? [{ src: `${domain}/favicon.png`, mimeType: "image/png", sizes: ["256x256"] }] : undefined);
         const listed = await client.listResources();
-        expect(listed.resources).toHaveLength(18);
+        expect(listed.resources.map(resource => resource.uri)).toEqual([HISTORY_SUMMARY_URI]);
         for (const { uri, _meta } of listed.resources) {
           const result = await client.readResource({ uri });
           const domain = publicBaseUrl?.startsWith("https:") ? "https://mcp.example.test" : undefined;
           const expected = {
             ...(domain && { "openai/widgetDomain": domain }),
+            "openai/widgetCSP": {
+              connect_domains: [], resource_domains: [], redirect_domains: [],
+            },
             ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } },
           };
           expect(result.contents[0]?._meta).toEqual(expected);
@@ -363,6 +412,11 @@ describe("HTTP MCP service", () => {
       uri: HISTORY_SUMMARY_URI,
       mimeType: "text/html;profile=mcp-app",
       _meta: {
+        "openai/widgetCSP": {
+          connect_domains: [],
+          resource_domains: [],
+          redirect_domains: [],
+        },
         ui: {
           csp: {
             connectDomains: [],
@@ -381,7 +435,7 @@ describe("HTTP MCP service", () => {
     expect(html).toContain("History contents");
     expect(html).toContain('document.createElement("button")');
     expect(html).toContain('request("tools/call", {');
-    expect(html).toContain('name: html ? "get_dataset_html" : "get_dataset_text"');
+    expect(html).toContain('name: html ? "get_dataset_html" : "read_dataset_report"');
     expect(html).toContain("new DOMParser()");
     expect(html).not.toMatch(/createElement\("iframe"\)|\.srcdoc/);
     expect(html).toContain("Static report preview");
@@ -399,13 +453,6 @@ describe("HTTP MCP service", () => {
     expect(html).not.toContain("innerHTML");
     expect(html.replaceAll("http://www.w3.org/1999/xhtml", "")).not.toMatch(/https?:\/\//);
     expect(() => new Function(html.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "")).not.toThrow();
-
-    for (let version = 1; version <= 9; version += 1) {
-      const legacyUri = `ui://galaxy/history-summary-v${version}.html`;
-      const legacy = await client.readResource({ uri: legacyUri });
-      expect(legacy.contents[0]).toMatchObject({ uri: legacyUri, mimeType: "text/html;profile=mcp-app" });
-      expect("text" in legacy.contents[0]! ? legacy.contents[0].text : "").toBe(html);
-    }
 
     const invalidUpload = await client.callTool({
       name: "upload_file_from_url",
@@ -523,7 +570,12 @@ describe("HTTP MCP service", () => {
         pagination: { total: 2, limit: 1 },
       });
       const contents = await client.callTool({ name: "get_history_contents", arguments: { historyId: "h1", limit: 20 } });
-      expect(contents.structuredContent).toMatchObject({ success: true, data: [{ id: "d1", state: "ok" }] });
+      expect(contents.structuredContent).toMatchObject({ success: true, data: [{ id: "d1", state: "ok" }], history_name: "FastQC E2E" });
+      // Galaxy's own snake_case names work too, and a missing id is named both ways.
+      const snakeCased = await client.callTool({ name: "get_history_contents", arguments: { history_id: "h1", limit: 20 } });
+      expect(snakeCased.structuredContent).toEqual(contents.structuredContent);
+      const missing = await client.callTool({ name: "get_history_contents", arguments: { limit: 20 } });
+      expect(missing).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringContaining("historyId (or history_id)") }] });
       const historyDetails = await client.callTool({ name: "get_history_details", arguments: { historyId: "h1" } });
       expect(historyDetails.structuredContent).toEqual({ id: "h1", name: "FastQC E2E", state: "ok", count: 3,
         galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
@@ -533,7 +585,7 @@ describe("HTTP MCP service", () => {
       expect(dataset.structuredContent).toMatchObject({ success: true, data: { id: "d1", file_ext: "fastqsanger" } });
       const rawInputText = await client.callTool({ name: "get_dataset_text", arguments: { datasetId: "d1" } });
       expect(rawInputText).toMatchObject({ isError: true, content: expect.arrayContaining([{ type: "text", text: expect.stringContaining("reads only") }]) });
-      const datasetText = await client.callTool({ name: "get_dataset_text", arguments: { datasetId: "d3", maxChars: 80 } });
+      const datasetText = await client.callTool({ name: "get_dataset_text", arguments: { dataset_id: "d3", max_chars: 80 } });
       expect(datasetText.structuredContent).toEqual({
         galaxy: { instance: "galaxy.example.test", url: "https://galaxy.example.test" },
         dataset_id: "d3",
@@ -565,6 +617,9 @@ describe("HTTP MCP service", () => {
       expect(upload.structuredContent).toMatchObject({ success: true, data: { jobs: [{ id: "j1", state: "new" }] } });
       expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
         "GET /api/tools",
+        "GET /api/histories/h1",
+        "GET /api/histories/h1/contents",
+        "GET /api/histories/h1",
         "GET /api/histories/h1/contents",
         "GET /api/histories/h1",
         "GET /api/datasets/d1",

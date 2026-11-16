@@ -12,7 +12,7 @@ jobs:
         with:
           node-version: '22'
       - run: corepack enable
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3 poppler-utils fonts-dejavu-core
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3 python3-pil poppler-utils fonts-dejavu-core
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: python3 -B -m unittest discover -s tests/deploy

@@ -32,7 +32,8 @@ def write_private(path, content):
 
 
 def public_check(origin, broker=False):
-    checks = [("/readyz", "200"), ("/.well-known/oauth-authorization-server", "200")] if broker else [("/readyz", "200"), ("/mcp", "401")]
+    # A broker that shares the MCP hostname has no public readiness path of its own.
+    checks = [("/.well-known/oauth-authorization-server", "200")] if broker else [("/readyz", "200"), ("/mcp", "401")]
     for path, expected in checks:
         response = run(["curl", "--silent", "--show-error", "--max-time", "15",
                         "--output", os.devnull, "--write-out", "%{http_code}", origin + path],
@@ -41,7 +42,17 @@ def public_check(origin, broker=False):
             raise RuntimeError(f"Public {path} check failed (expected {expected}).")
 
 
-def release(root, image, with_broker=False, instances=None):
+def hostname(config, name, required=True):
+    values = re.findall(rf"^{name}=(.*)$", config, re.MULTILINE)
+    fields = shlex.split(values[0]) if len(values) == 1 else []
+    if len(fields) == 1 and re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", fields[0]):
+        return fields[0]
+    if values or required:
+        raise ValueError(f"{name} must be one literal DNS hostname.")
+    return None
+
+
+def release(root, image, with_broker=False, instances=None, build_context=None):
     if not re.fullmatch(r"galaxy-mcp-service:release-[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", image):
         raise ValueError("Use a unique galaxy-mcp-service:release-... image tag.")
     data = root / "data"
@@ -53,14 +64,14 @@ def release(root, image, with_broker=False, instances=None):
     with os.fdopen(os.open(data / "release.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         original = config.read_text()
-        hosts = re.findall(r"^MCP_HOST=(.*)$", original, re.MULTILINE)
-        host = shlex.split(hosts[0]) if len(hosts) == 1 else []
-        if len(host) != 1 or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", host[0]):
-            raise ValueError("MCP_HOST must be one literal DNS hostname.")
-        broker_hosts = re.findall(r"^BROKER_HOST=(.*)$", original, re.MULTILINE)
-        broker_host = shlex.split(broker_hosts[0]) if len(broker_hosts) == 1 else []
-        if with_broker and (len(broker_host) != 1 or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", broker_host[0])):
-            raise ValueError("BROKER_HOST must be one literal DNS hostname.")
+        host = hostname(original, "MCP_HOST")
+        legacy_mcp = hostname(original, "LEGACY_MCP_HOST", required=False)
+        legacy_broker = hostname(original, "LEGACY_BROKER_HOST", required=False)
+        if (legacy_mcp is None) != (legacy_broker is None):
+            raise ValueError("Set LEGACY_MCP_HOST and LEGACY_BROKER_HOST together.")
+        # The broker shares the MCP hostname; the legacy pair keeps the original two hostnames.
+        mcps = {"mcp": host, **({"legacy-mcp": legacy_mcp} if legacy_mcp else {})}
+        brokers = {"broker": host, **({"legacy-broker": legacy_broker} if legacy_broker else {})}
         candidate, count = re.subn(r"^GALAXY_MCP_IMAGE=.*$", lambda _: f"GALAXY_MCP_IMAGE='{image}'",
                                   original, flags=re.MULTILINE)
         if count != 1:
@@ -86,7 +97,7 @@ def release(root, image, with_broker=False, instances=None):
         compose = ["docker", "compose", "--project-name", "galaxy-mcp", "--env-file", "data/lightsail.env", "-f", "deploy/lightsail.compose.json"]
         keys = set(re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)=", original, re.MULTILINE))
         compose_env = {key: value for key, value in os.environ.items() if key not in keys}
-        services = ["mcp", "broker"] if with_broker else ["mcp"]
+        services = [*mcps, *brokers] if with_broker else [*mcps]
         previous_images = {}
         for service in services:
             current = run(compose + ["ps", "-q", service], cwd=root, env=compose_env, capture_output=True).stdout.strip()
@@ -101,11 +112,9 @@ def release(root, image, with_broker=False, instances=None):
         exists = subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if exists.returncode == 0:
             raise ValueError("That release tag already exists; never overwrite a rollback image.")
-        public_check("https://" + host[0])
-        if with_broker:
-            public_check("https://" + broker_host[0], broker=True)
+        check_public(mcps, brokers if with_broker else {})
         # Dockerfile runs the existing lint, type and service tests before producing this image.
-        run(["docker", "build", "-t", image, "."], cwd=root)
+        run(["docker", "build", "-t", image, str(build_context) if build_context is not None else "."], cwd=root)
         with tempfile.NamedTemporaryFile(mode="w", dir=data, prefix="lightsail.env.pre-release-", delete=False) as backup:
             backup.write(original)
             backup.flush()
@@ -115,22 +124,30 @@ def release(root, image, with_broker=False, instances=None):
             write_private(config, candidate)
             for service in services:
                 run(update + [service], cwd=root, env={**compose_env, "GALAXY_MCP_IMAGE": image})
-                if service == "broker":
-                    public_check("https://" + broker_host[0], broker=True)
-            public_check("https://" + host[0])
+                if service in brokers:
+                    public_check("https://" + brokers[service], broker=True)
+            if with_broker:
+                # MCP reads broker capabilities at startup; reload after the new broker is healthy.
+                run(update + ["--force-recreate", *mcps], cwd=root, env={**compose_env, "GALAXY_MCP_IMAGE": image})
+            check_public(mcps, {})
         except BaseException:
             try:
                 write_private(config, original)
                 # Restore the old broker before the old resource server: old MCP must never consume a bundle.
-                for service in reversed(services):
+                for service in [*brokers, *mcps] if with_broker else [*mcps]:
                     run(update + [service], cwd=root, env={**compose_env, "GALAXY_MCP_IMAGE": previous_images[service]})
-                if with_broker:
-                    public_check("https://" + broker_host[0], broker=True)
-                public_check("https://" + host[0])
+                check_public(mcps, brokers if with_broker else {})
             except BaseException:
                 raise RuntimeError("Update and rollback failed. Recover using the retained configuration backup.") from None
             raise RuntimeError("Update failed; previous configuration and image restored and health checks passed.") from None
         print(f"MCP healthy: {image}. Backup: {Path(backup.name).relative_to(root)}. " + ("Broker updated and healthy." if with_broker else "Broker unchanged."))
+
+
+def check_public(mcps, brokers):
+    for host in brokers.values():
+        public_check("https://" + host, broker=True)
+    for host in mcps.values():
+        public_check("https://" + host)
 
 
 def interrupted(_signum, _frame):
@@ -143,12 +160,13 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("image")
         parser.add_argument("--with-broker", action="store_true")
+        parser.add_argument("--build-context", type=Path, help="Clean source directory to build; live configuration remains in this checkout")
         parser.add_argument("--instances", type=Path, help="Reviewed additive instance-map JSON; requires --with-broker")
         args = parser.parse_args()
         instances = json.loads(args.instances.read_text()) if args.instances else None
         if args.instances and not isinstance(instances, dict):
             raise ValueError("The approved instance file must contain a JSON object.")
-        release(Path(__file__).resolve().parents[1], args.image, with_broker=args.with_broker, instances=instances)
+        release(Path(__file__).resolve().parents[1], args.image, with_broker=args.with_broker, instances=instances, build_context=args.build_context)
     except (Exception, KeyboardInterrupt) as error:
         # Do not print subprocess output, environment contents or credential-bearing diagnostics.
         print(str(error) if isinstance(error, (ValueError, RuntimeError)) else "Release failed; inspect the last safe build/status output.", file=sys.stderr)

@@ -1,10 +1,11 @@
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { readDatasetReport } from "../../apps/service/src/report-reader.js";
 import { postModern, startTestService } from "../helpers/service.js";
-import { reportPdf } from "../helpers/report.js";
+import { rasterImage, reportPdf } from "../helpers/report.js";
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
 const html = `<html><head><style>hidden CSS</style><script>sendCredentials()</script></head><body>
@@ -114,7 +115,7 @@ it.each([
   ["pdf", reportPdf(), {}, { ...args, page: 4 }],
   ["html", html, {}, { ...args, page: 2 }],
   ["txt", "abc", {}, { ...args, offset: 4 }],
-  ["fastqsanger", "reads", {}, args],
+  ["bam", Buffer.from("BAM\u0001\u0000"), {}, args],
   ["html", html, { state: "running" }, args],
   ["html", html, { deleted: true }, args],
   ["pdf", reportPdf(), { file_size: 20_000_001 }, args],
@@ -223,4 +224,50 @@ it("bounds malformed HTML structure and oversized/missing embedded figures", asy
   expect(many.structuredContent?.figure_count).toBe(105);
   expect(many.structuredContent?.figures).toHaveLength(100);
   expect(String(many.structuredContent?.limitations)).toContain("first 100");
+});
+
+it("previews all UTF-8 datatypes and quoted tables, without treating binary/active content as executable text", async () => {
+  for (const [format, text] of [["json", '{"sample":"A","reads":900}'], ["xml", '<sample name="A">900</sample>'], ["markdown", "# Report\n900 reads"], ["fasta", ">A\nACGT"], ["custom_text_format", "Unicode evidence 🧪"]]) {
+    const result = await readDatasetReport(args, connection(format, text), new AbortController().signal);
+    expect(result.structuredContent).toMatchObject({ text, preview_kind: "text" });
+  }
+  const csv = 'sample,value\n"A, one","line 1\nline 2"\n"<script>bad()</script>",900\n';
+  const table = await readDatasetReport(args, connection("csv", csv), new AbortController().signal);
+  expect(table.structuredContent?.text).toBe(csv);
+  expect(table._meta?.preview).toEqual({ kind: "table", limited: false, rows: [["sample", "value"], ["A, one", "line 1\nline 2"], ["<script>bad()</script>", "900"]] });
+  expect(table.structuredContent).not.toHaveProperty("rows");
+  const compressed = await readDatasetReport(args, connection("fastqsanger.gz", gzipSync("@A\nACGT\n+\nIIII\n")), new AbortController().signal);
+  expect(compressed.structuredContent?.text).toBe("@A\nACGT\n+\nIIII\n");
+  const expanded = await readDatasetReport({ ...args, maxChars: 4 }, connection("custom_text.gz", gzipSync("A".repeat(20_000_001))), new AbortController().signal);
+  expect(expanded.structuredContent).toMatchObject({ text: "AAAA", total_characters: 20_000_000, truncated: true });
+  expect(String(expanded.structuredContent?.limitations)).toContain("first 20 MB of decompressed");
+  const binary = await readDatasetReport(args, connection("h5ad", Buffer.from("\u0089HDF\u0000binary")), new AbortController().signal);
+  expect(binary.isError).toBe(true);
+});
+
+it("decodes native images and TIFF frames, sanitizes SVG, and keeps media bytes out of model text", async () => {
+  for (const format of ["PNG", "JPEG", "GIF", "WEBP", "BMP", "TIFF"]) {
+    const result = await readDatasetReport({ ...args, includeImage: true }, connection(format.toLowerCase(), rasterImage(format)), new AbortController().signal);
+    expect(result.structuredContent).toMatchObject({ preview_kind: "image", image_returned: true, text: "", page: 1 });
+    expect(result.content.some(block => block.type === "image" && block.mimeType === "image/png")).toBe(true);
+  }
+  const frames = await readDatasetReport({ ...args, page: 2, includeImage: true }, connection("tiff", rasterImage("TIFF", 3)), new AbortController().signal);
+  expect(frames.structuredContent).toMatchObject({ page: 2, page_count: 3, next_page: 3 });
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80" onload="bad()"><script>bad()</script><foreignObject>hidden</foreignObject><image href="https://attacker.example/image"/><rect width="80" height="50" fill="blue"/><text y="70">Actual label</text></svg>';
+  const vector = await readDatasetReport({ ...args, includeImage: true }, connection("svg", svg), new AbortController().signal);
+  expect(vector.structuredContent).toMatchObject({ preview_kind: "svg", text: "Actual label", image_returned: false });
+  const preview = vector._meta?.preview as { data: string };
+  const sanitized = Buffer.from(preview.data, "base64").toString();
+  expect(sanitized).toContain("rect");
+  expect(sanitized).not.toMatch(/script|onload|foreignObject|attacker|href/);
+  expect((await readDatasetReport(args, connection("svg", '<!DOCTYPE svg [<!ENTITY x "expand">]><svg>&x;</svg>'), new AbortController().signal)).isError).toBe(true);
+  const wav = Buffer.alloc(46);
+  wav.write("RIFF", 0); wav.writeUInt32LE(38, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(2, 40);
+  const audio = await readDatasetReport(args, connection("wav", wav), new AbortController().signal);
+  expect(audio.structuredContent).toMatchObject({ preview_kind: "audio", text: "", image_returned: false });
+  expect(audio._meta?.preview).toMatchObject({ kind: "audio", mimeType: "audio/wav" });
+  expect(JSON.stringify(audio.structuredContent)).not.toContain(wav.toString("base64"));
+  expect((await readDatasetReport(args, connection("wav", "not media"), new AbortController().signal)).isError).toBe(true);
 });

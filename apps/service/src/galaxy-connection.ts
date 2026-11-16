@@ -19,7 +19,7 @@ export const connectionSource = (connection: GalaxyConnection) => ({
 });
 
 export function authenticatedGalaxies(authInfo: AuthInfo): GalaxyConnection[] {
-  const values = authInfo.extra?.galaxies ?? [authInfo.extra?.galaxy];
+  const values = authInfo.extra?.galaxies;
   if (!Array.isArray(values) || !values.length || values.length > 10) return [];
   const parsed = z.array(z.object({
     instance: z.string().min(1).optional(), baseUrl: z.string().url(), apiKey: z.string().min(1),

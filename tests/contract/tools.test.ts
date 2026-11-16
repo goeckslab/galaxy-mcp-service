@@ -34,6 +34,7 @@ describe("Galaxy tool contract", () => {
     expect(response.status).toBe(200);
     expect(tools.map(({ name }) => name)).toEqual([
       "get_galaxy_connections",
+      "show_galaxy",
       "get_histories",
       "show_histories",
       ...productOperations.flatMap(({ name }) => name === "get_history_contents" ? [name, "show_history"] : [name]),
@@ -53,7 +54,7 @@ describe("Galaxy tool contract", () => {
         openWorldHint: expect.any(Boolean),
       });
       expect(JSON.stringify(tool.inputSchema)).not.toMatch(/api[_-]?key|password|secret|token/i);
-      if (tool.name !== "get_galaxy_connections") {
+      if (!["get_galaxy_connections", "show_galaxy"].includes(tool.name)) {
         expect(tool.inputSchema).toHaveProperty("properties.instance.type", "string");
         expect(tool.outputSchema).toHaveProperty("properties.galaxy.properties.instance.type", "string");
       }
@@ -73,11 +74,14 @@ describe("Galaxy tool contract", () => {
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
     });
     expect(tools.find(({ name }) => name === "get_histories")?.inputSchema).toMatchObject({
-      properties: { limit: { default: 5 }, offset: { default: 0 } },
+      properties: { limit: { maximum: 20, default: 5, description: "At most 20 per call; read more with pagination.next_offset" }, offset: { default: 0 } },
     });
     expect(tools.filter(tool => (tool._meta?.ui as { resourceUri?: string } | undefined)?.resourceUri).map(tool => tool.name)).toEqual([
-      "show_histories", "show_history", "show_dataset", "show_run_status",
+      "show_galaxy", "show_histories", "show_history", "show_dataset", "show_run_status",
     ]);
+    expect(tools.find(tool => tool.name === "show_galaxy")?._meta).toMatchObject({
+      ui: { resourceUri: HISTORY_SUMMARY_URI }, "openai/ui": { entrypoints: [{ type: "global" }, { type: "thread" }] },
+    });
     expect(tools.find(({ name }) => name === "show_history")).toMatchObject({
       name: "show_history",
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
@@ -86,16 +90,26 @@ describe("Galaxy tool contract", () => {
       properties: {
         limit: { type: "integer", minimum: 1, maximum: 100, default: 5 },
         offset: { type: "integer", minimum: 0, default: 0 },
+        historyId: { type: "string" },
+        history_id: { type: "string", description: "Same as historyId" },
       },
     });
+    for (const name of ["get_history_contents", "show_history"]) {
+      expect(tools.find(tool => tool.name === name)?.outputSchema).toMatchObject({
+        properties: {
+          data: { type: "array", items: { required: ["id", "name", "state"], properties: { extension: { description: "Datasets only; collections have no format" } } } },
+          pagination: { properties: { has_more: { type: "boolean" }, next_offset: { type: "integer" } } },
+        },
+      });
+    }
     expect(tools.find(({ name }) => name === "show_run_status")).toMatchObject({
-      inputSchema: { type: "object", required: ["kind", "runId"], additionalProperties: false },
+      inputSchema: { type: "object", required: ["kind"], properties: { runId: { type: "string" }, run_id: { type: "string" } }, additionalProperties: false },
       outputSchema: { type: "object", required: ["success", "run"] },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
     });
     expect(tools.find(({ name }) => name === "show_dataset")).toMatchObject({
-      inputSchema: { type: "object", required: ["datasetId"], additionalProperties: false },
+      inputSchema: { type: "object", properties: { datasetId: { type: "string" }, dataset_id: { type: "string" } }, additionalProperties: false },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       _meta: { ui: { resourceUri: HISTORY_SUMMARY_URI } },
     });
@@ -116,10 +130,11 @@ describe("Galaxy tool contract", () => {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
       inputSchema: {
         type: "object",
-        required: ["datasetId"],
         properties: {
           datasetId: { type: "string", minLength: 1 },
+          dataset_id: { type: "string", minLength: 1 },
           maxChars: { type: "integer", minimum: 1, maximum: 50_000, default: 20_000 },
+          max_chars: { type: "integer", minimum: 1, maximum: 50_000 },
         },
       },
       outputSchema: {
@@ -132,8 +147,7 @@ describe("Galaxy tool contract", () => {
       _meta: { ui: { visibility: ["app"] } },
       inputSchema: {
         type: "object",
-        required: ["datasetId"],
-        properties: { datasetId: { type: "string", minLength: 1 } },
+        properties: { datasetId: { type: "string", minLength: 1 }, dataset_id: { type: "string", minLength: 1 } },
       },
       outputSchema: {
         type: "object",
@@ -141,7 +155,7 @@ describe("Galaxy tool contract", () => {
       },
     });
     expect(tools.find(({ name }) => name === "read_dataset_report")).toMatchObject({
-      inputSchema: { type: "object", required: ["datasetId"], additionalProperties: false },
+      inputSchema: { type: "object", properties: { datasetId: { type: "string" }, dataset_id: { type: "string" } }, additionalProperties: false },
       outputSchema: { type: "object", properties: { source_sha256: { type: "string" }, next_page: { type: "integer" } } },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     });
