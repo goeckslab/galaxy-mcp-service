@@ -21,6 +21,8 @@ const callback = "http://127.0.0.1/callback";
 const keys = { us: "fixture-alice-us-key", eu: "fixture-bob-eu-key" };
 const otherClientSecret = "fixture-other-confidential-client-secret";
 const apiRequests: string[] = [];
+// Access tokens a signed-in site accepts, mapped to the Galaxy account; null is a sign-in Galaxy has not linked yet.
+const bearerUsers = new Map<string, string | null>();
 let container: string | undefined;
 let databaseUrl: string;
 let galaxy: Server;
@@ -188,6 +190,18 @@ beforeAll(async () => {
   }
   galaxy = createServer((req, res) => {
     const path = new URL(req.url!, "http://fixture").pathname;
+    if (path.startsWith("/signin/")) {
+      const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? "";
+      apiRequests.push(`${req.method} ${path} bearer:${token} key:${req.headers["x-api-key"] ?? ""}`);
+      res.setHeader("content-type", "application/json");
+      const user = bearerUsers.get(token);
+      if (user === null) { res.writeHead(401).end(JSON.stringify({ err_msg: "Cannot locate user by access token. The user should log into Galaxy at least once with this OIDC provider." })); return; }
+      if (!user || req.headers["x-api-key"]) { res.writeHead(401).end(JSON.stringify({ err_msg: "Invalid access token." })); return; }
+      if (path.endsWith("/api/users/current")) res.end(JSON.stringify({ id: user, deleted: false }));
+      else if (path.endsWith("/api/histories")) res.end(JSON.stringify([{ id: "history-test", name: "Signed-in test history", state: "ok" }]));
+      else res.writeHead(404).end("{}");
+      return;
+    }
     const instance = path.startsWith("/us/") ? "us" : "eu";
     apiRequests.push(`${req.method} ${path} ${req.headers["x-api-key"]}`);
     res.setHeader("content-type", "application/json");
@@ -839,5 +853,152 @@ describe("durable Galaxy credential broker", () => {
       expect(await store.credential(id)).toBeUndefined();
     } finally { await store.close(); }
     expect(apiRequests.every(request => request.startsWith("GET "))).toBe(true);
+  });
+  it("signs in to a site through its login provider, refreshes the token once for concurrent requests, and drops the site when the sign-in ends", async () => {
+    // A login provider like auth.usegalaxy.org: PKCE codes, and refresh tokens it accepts only once.
+    const provider = { codes: new Map<string, { challenge: string; user: string | null }>(), refresh: new Map<string, string | null>(),
+      refreshes: 0, ended: false, nextUser: "signin-user" as string | null, count: 0 };
+    const clientSecret = "fixture-signin-client-secret";
+    const realm = () => `${address(idp)}/realms/galaxy-test`;
+    const issue = (user: string | null) => {
+      const access = `fixture-access-${++provider.count}`;
+      const refresh = `fixture-refresh-${provider.count}`;
+      bearerUsers.set(access, user);
+      provider.refresh.set(refresh, user);
+      return { access_token: access, refresh_token: refresh, token_type: "Bearer", expires_in: 300 };
+    };
+    const idp = createServer(async (req, res) => {
+      const url = new URL(req.url!, "http://fixture");
+      res.setHeader("content-type", "application/json");
+      if (url.pathname === "/realms/galaxy-test/.well-known/openid-configuration") {
+        res.end(JSON.stringify({ issuer: realm(), authorization_endpoint: `${realm()}/auth`, token_endpoint: `${realm()}/token`, code_challenge_methods_supported: ["S256"] }));
+      } else if (url.pathname === "/realms/galaxy-test/auth") {
+        expect(url.searchParams.get("client_id")).toBe("galaxy-mcp");
+        expect(url.searchParams.get("redirect_uri")).toBe(`${config.issuer}/interaction/keycloak/callback`);
+        expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+        const code = randomBytes(8).toString("hex");
+        provider.codes.set(code, { challenge: url.searchParams.get("code_challenge")!, user: provider.nextUser });
+        res.writeHead(302, { location: `${url.searchParams.get("redirect_uri")}?code=${code}&state=${encodeURIComponent(url.searchParams.get("state")!)}` }).end();
+      } else if (url.pathname === "/realms/galaxy-test/token" && req.method === "POST") {
+        expect(req.headers.authorization).toBe(`Basic ${Buffer.from(`galaxy-mcp:${clientSecret}`).toString("base64")}`);
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const form = new URLSearchParams(body);
+        if (form.get("grant_type") === "authorization_code") {
+          const issued = provider.codes.get(form.get("code")!);
+          provider.codes.delete(form.get("code")!);
+          if (!issued || createHash("sha256").update(form.get("code_verifier")!).digest("base64url") !== issued.challenge) { res.writeHead(400).end(JSON.stringify({ error: "invalid_grant" })); return; }
+          res.end(JSON.stringify(issue(issued.user)));
+        } else {
+          provider.refreshes++;
+          const token = form.get("refresh_token")!;
+          // A replayed refresh token ends the whole session, as the realm is configured to do.
+          if (provider.ended || !provider.refresh.has(token)) { provider.ended = true; res.writeHead(400).end(JSON.stringify({ error: "invalid_grant" })); return; }
+          const user = provider.refresh.get(token)!;
+          provider.refresh.delete(token);
+          await new Promise(resolve => setTimeout(resolve, 50));
+          res.end(JSON.stringify(issue(user)));
+        }
+      } else res.writeHead(404).end("{}");
+    });
+    idp.listen(0, "127.0.0.1"); await once(idp, "listening");
+    const signInConfig: BrokerConfig = { ...config, instances: { ...config.instances, test: `${address(galaxy)}/signin` },
+      galaxyLogins: { test: { issuer: realm(), client_id: "galaxy-mcp", client_secret: clientSecret } } };
+    await broker.close(); broker = await createBroker(signInConfig); handler = broker.callback;
+    /** Connects with the given fields, following the provider's login page; returns the response back at the broker. */
+    const connect = async (fields: Record<string, string>, browser = new Browser()) => {
+      const auth = await authorization("client-a", {}, browser);
+      const submitted = await auth.browser.request(auth.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields }) });
+      expect(submitted.status).toBe(200);
+      expect(submitted.headers.get("content-security-policy")).toContain("form-action 'self'");
+      const html = await submitted.text();
+      expect(html).not.toMatch(/fixture-.*-key/);
+      // The provider is reached by navigation, not by redirecting a form submission past form-action.
+      const target = /http-equiv="refresh" content="0;url=([^"]+)"/.exec(html)![1]!.replaceAll("&amp;", "&");
+      expect(target.startsWith(`${realm()}/auth?`)).toBe(true);
+      const login = await fetch(target, { redirect: "manual" });
+      return { auth, back: login.headers.get("location")! };
+    };
+    try {
+      const form = await authorization();
+      expect(form.html).toContain('name="login.test"');
+      expect(form.html).not.toContain('name="login.us"');
+      expect(form.html).toContain("chose to sign in");
+
+      const { auth, back } = await connect({ "login.test": "yes", "api_key.us": keys.us });
+      const returned = await auth.browser.request(back);
+      expect(returned.status).toBe(303);
+      // The provider's response works once.
+      expect((await auth.browser.request(back)).status).toBe(400);
+      // Only the browser that started connecting can finish: the interaction cookie is scoped to its path.
+      expect((await new Browser().request(returned.headers.get("location")!)).status).toBe(400);
+      let response = await resume(auth, await auth.browser.request(returned.headers.get("location")!));
+      while (response.status === 303 && new URL(response.headers.get("location")!, config.issuer).origin === config.issuer) {
+        response = await auth.browser.request(new URL(response.headers.get("location")!, config.issuer).href);
+      }
+      const code = new URL(response.headers.get("location")!).searchParams.get("code")!;
+      const issued = await (await exchange({ ...auth, code })).json() as Tokens;
+      expect(await (await introspect(issued.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [
+        { instance: "test", access_token: "fixture-access-1", url: signInConfig.instances.test },
+        { instance: "us", api_key: keys.us, url: config.instances.us },
+      ] });
+      expect(provider.refreshes).toBe(0);
+      const stored = await database.query<{ payload: Buffer }>("SELECT payload FROM galaxy_broker_credentials");
+      expect(stored.rows.every(row => !row.payload.includes("fixture-refresh-") && !row.payload.includes("fixture-access-"))).toBe(true);
+
+      // The service sends the sign-in to Galaxy as a bearer token, never as an API key.
+      const service = await loadUniversalAuth({ metadataUrl: `${config.issuer}/.well-known/oauth-authorization-server`,
+        introspectionClientId: config.resourceClientId, introspectionClientSecret: config.resourceClientSecret,
+        instancesJson: JSON.stringify(signInConfig.instances), resourceServerUrl: resource });
+      const mcp = await startTestService({ auth: service });
+      try {
+        const request = modernRequest("tools/call", { name: "get_histories", arguments: { instance: "test" } });
+        request.headers.set("authorization", `Bearer ${issued.access_token}`);
+        const payload = await (await fetch(`${mcp.baseUrl}/mcp`, { method: "POST", headers: request.headers, body: JSON.stringify(request.body) })).json();
+        expect(payload.result.structuredContent).toMatchObject({ galaxy: { instance: "test" }, histories: [{ name: "Signed-in test history" }] });
+        expect(apiRequests).toContain("GET /signin/api/histories bearer:fixture-access-1 key:");
+        expect(mcp.logs.join(" ")).not.toContain("fixture-access-1");
+      } finally { await mcp.stop(); }
+
+      // Close to expiry, concurrent requests wait for one refresh; the provider would end the session on a replay.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 250_000);
+      const concurrent = await Promise.all(Array.from({ length: 5 }, async () => (await introspect(issued.access_token)).json()));
+      expect(provider.refreshes).toBe(1);
+      for (const value of concurrent) expect(value.galaxy_connections).toContainEqual({ instance: "test", access_token: "fixture-access-2", url: signInConfig.instances.test });
+
+      // When the provider ends the sign-in, the site is left out until the user connects again; other sites keep working.
+      provider.ended = true;
+      vi.setSystemTime(Date.now() + 250_000);
+      const renewed = await (await tokenRequest({ client_id: "client-a", grant_type: "refresh_token", refresh_token: issued.refresh_token, resource })).json() as Tokens;
+      expect(await (await introspect(renewed.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ instance: "us", api_key: keys.us, url: config.instances.us }] });
+      expect((await (await introspect(renewed.access_token)).json()).galaxy_connections).toHaveLength(1);
+      expect(provider.refreshes).toBe(2);
+      vi.useRealTimers();
+
+      // A sign-in Galaxy has not linked to an account yet says what to do instead of failing silently.
+      provider.ended = false;
+      provider.nextUser = null;
+      const unlinked = await connect({ "login.test": "yes" });
+      const refused = await unlinked.auth.browser.request(unlinked.back);
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain("does not recognize this sign-in yet. Log in to");
+
+      // Cancelling at the provider, a replayed callback, and a key together with sign-in for one site are refused.
+      provider.nextUser = "signin-user";
+      const cancelled = await connect({ "login.test": "yes" });
+      const url = new URL(cancelled.back);
+      url.searchParams.delete("code"); url.searchParams.set("error", "access_denied");
+      expect(await (await cancelled.auth.browser.request(url.href)).text()).toContain("was not completed");
+      expect((await cancelled.auth.browser.request(cancelled.back)).status).toBe(400);
+      const both = await authorization();
+      expect((await both.browser.request(both.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrf: both.csrf, consent: "yes", action: "connect", "login.test": "yes", "api_key.test": "fixture-other-key" }) })).status).toBe(400);
+    } finally {
+      vi.useRealTimers();
+      await close(idp);
+      await broker.close(); broker = await createBroker(config); handler = broker.callback;
+    }
   });
 });

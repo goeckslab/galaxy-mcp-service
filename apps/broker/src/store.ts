@@ -4,13 +4,33 @@ import { errors, type Adapter, type AdapterConstructor, type AdapterPayload } fr
 import pg from "pg";
 import { storedSubscription, type EventLease, type EventState, type SubscribeParams, type UnsubscribeParams } from "@galaxy-mcp-service/protocol";
 
+import { LoginExpired, type LoginTokens } from "./galaxy-login.js";
+
+/** A site authorized with the user's API key, or by signing in to the site's login provider. */
+export type Connection =
+  | { instance: string; baseUrl: string; apiKey: string }
+  | { instance: string; baseUrl: string; login: LoginTokens & { expired?: boolean } };
+
+/** What a Galaxy request runs with: an API key, or a sign-in's access token sent as a bearer. */
+export type UsableConnection = EventLease["connection"];
+
 export interface Credential {
   accountId: string;
   clientId: string;
   instance: string;
   audience: string;
-  connections: { instance: string; apiKey: string; baseUrl: string }[];
+  connections: Connection[];
 }
+
+// Access tokens are refreshed when less than this remains, so a request rarely outlives its token.
+const REFRESH_BEFORE_MS = 120000;
+const needsRefresh = (connection: Connection) => "login" in connection && !connection.login.expired
+  && connection.login.expiresAt - Date.now() < REFRESH_BEFORE_MS;
+/** An expired sign-in is left out: Galaxy would refuse it, and the user has to sign in again. */
+export const usableConnections = (connections: Connection[]): UsableConnection[] => connections.flatMap(connection =>
+  !("login" in connection) ? [{ instance: connection.instance, baseUrl: connection.baseUrl, apiKey: connection.apiKey }]
+    : connection.login.expired ? []
+      : [{ instance: connection.instance, baseUrl: connection.baseUrl, apiKey: connection.login.accessToken, tokenType: "bearer" as const }]);
 
 export interface ManagedCredential {
   grantId: string;
@@ -19,7 +39,10 @@ export interface ManagedCredential {
   connections: { instance: string; baseUrl: string }[];
 }
 
-export async function createStore(connectionString: string, key: Buffer) {
+export async function createStore(
+  connectionString: string, key: Buffer,
+  refresh?: (instance: string, refreshToken: string) => Promise<LoginTokens>,
+) {
   if (key.length !== 32) throw new Error("Broker encryption key must contain 32 bytes.");
   const pool = new pg.Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000 });
   pool.on("error", () => console.error("Broker database connection failed."));
@@ -135,14 +158,52 @@ export async function createStore(connectionString: string, key: Buffer) {
   ]))}`;
   type EventRow = { id: string; grant_id: string; instance: string; payload: Buffer; expires_at: string; revision: number; lease_token: string; next_at: string | null };
   const eventPayload = (row: EventRow) => storedSubscription.parse(decrypt(row.payload, `RunEvent:${row.id}:${row.grant_id}`));
+  type CredentialRow = { account_id: string; client_id: string; instance: string; audience: string; payload: Buffer };
+  const rowValue = (row: CredentialRow) => ({ accountId: row.account_id, clientId: row.client_id, instance: row.instance, audience: row.audience });
+  /**
+   * Refreshes the sign-ins of a grant that are about to expire. The row lock makes concurrent
+   * requests wait for one refresh: the provider accepts each refresh token only once.
+   */
+  async function refreshLogins(grant: string): Promise<Connection[] | undefined> {
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+      const result = await db.query<CredentialRow>("SELECT * FROM galaxy_broker_credentials WHERE grant_id=$1 AND expires_at>$2 FOR UPDATE", [grant, Date.now()]);
+      const row = result.rows[0];
+      if (!row) { await db.query("ROLLBACK"); return undefined; }
+      const value = rowValue(row);
+      const { connections } = decrypt<Pick<Credential, "connections">>(row.payload, binding(grant, value));
+      let changed = false;
+      for (const [index, connection] of connections.entries()) {
+        if (!refresh || !needsRefresh(connection) || !("login" in connection)) continue;
+        try {
+          connections[index] = { ...connection, login: await refresh(connection.instance, connection.login.refreshToken) };
+          changed = true;
+        } catch (error) {
+          // A temporary failure keeps the current token; the next request tries again.
+          if (error instanceof LoginExpired) { connections[index] = { ...connection, login: { ...connection.login, expired: true } }; changed = true; }
+        }
+      }
+      if (changed) await db.query("UPDATE galaxy_broker_credentials SET payload=$1 WHERE grant_id=$2", [encrypt({ connections }, binding(grant, value)), grant]);
+      await db.query("COMMIT");
+      return connections;
+    } catch (error) {
+      await db.query("ROLLBACK");
+      throw error;
+    } finally { db.release(); }
+  }
   async function eventConnection(grant: string, instance: string, db: Pick<pg.Pool, "query"> = pool) {
-    const result = await db.query<{
-      account_id: string; client_id: string; instance: string; audience: string; payload: Buffer;
-    }>("SELECT * FROM galaxy_broker_credentials WHERE grant_id=$1 AND expires_at>$2", [grant, Date.now()]);
+    const result = await db.query<CredentialRow>("SELECT * FROM galaxy_broker_credentials WHERE grant_id=$1 AND expires_at>$2", [grant, Date.now()]);
     const row = result.rows[0];
     if (!row) return undefined;
-    const value = { accountId: row.account_id, clientId: row.client_id, instance: row.instance, audience: row.audience };
-    return decrypt<Pick<Credential, "connections">>(row.payload, binding(grant, value)).connections.find(value => value.instance === instance);
+    return decrypt<Pick<Credential, "connections">>(row.payload, binding(grant, rowValue(row))).connections.find(value => value.instance === instance);
+  }
+  /** The connection a run-event worker sends to Galaxy, refreshed outside any lock the caller holds on the event. */
+  async function workerConnection(grant: string, instance: string, db: Pick<pg.Pool, "query"> = pool): Promise<UsableConnection | undefined> {
+    const connection = await eventConnection(grant, instance, db);
+    if (!connection) return undefined;
+    const current = needsRefresh(connection) ? (await refreshLogins(grant))?.find(value => value.instance === instance) : connection;
+    return current ? usableConnections([current])[0] : undefined;
   }
   return {
     adapter: PostgresAdapter as AdapterConstructor,
@@ -156,13 +217,18 @@ export async function createStore(connectionString: string, key: Buffer) {
     },
     async credential(grantId: string): Promise<Credential | undefined> {
       const grant = hash(`grant:${grantId}`);
-      const result = await pool.query<{
-        account_id: string; client_id: string; instance: string; audience: string; payload: Buffer;
-      }>("SELECT * FROM galaxy_broker_credentials WHERE grant_id=$1 AND expires_at>$2", [grant, Date.now()]);
+      const result = await pool.query<CredentialRow>("SELECT * FROM galaxy_broker_credentials WHERE grant_id=$1 AND expires_at>$2", [grant, Date.now()]);
       const row = result.rows[0];
       if (!row) return undefined;
-      const value = { accountId: row.account_id, clientId: row.client_id, instance: row.instance, audience: row.audience };
+      const value = rowValue(row);
       return { ...value, ...decrypt<Pick<Credential, "connections">>(row.payload, binding(grant, value)) };
+    },
+    /** The grant's credential with sign-ins refreshed when they are about to expire. */
+    async freshCredential(grantId: string): Promise<Credential | undefined> {
+      const credential = await this.credential(grantId);
+      if (!credential?.connections.some(needsRefresh)) return credential;
+      const connections = await refreshLogins(hash(`grant:${grantId}`));
+      return connections && { ...credential, connections };
     },
     async hasAccount(accountId: string) {
       const result = await pool.query("SELECT 1 FROM galaxy_broker_credentials WHERE account_id=$1 AND expires_at>$2 LIMIT 1", [accountId, Date.now()]);
@@ -271,7 +337,7 @@ export async function createStore(connectionString: string, key: Buffer) {
           ORDER BY e.next_at LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [now, audience]);
         const row = result.rows[0];
         if (!row) { await db.query("COMMIT"); return null; }
-        const connection = await eventConnection(row.grant_id, row.instance, db);
+        const connection = await workerConnection(row.grant_id, row.instance, db);
         if (!connection) {
           await db.query("DELETE FROM galaxy_broker_events WHERE id=$1", [row.id]);
           await db.query("COMMIT"); return null;
@@ -286,7 +352,7 @@ export async function createStore(connectionString: string, key: Buffer) {
     async checkEvent(id: string, revision: number, lease: string): Promise<EventLease | null> {
       const result = await pool.query<EventRow>("SELECT * FROM galaxy_broker_events WHERE id=$1 AND revision=$2 AND lease_token=$3 AND lease_until>$4 AND expires_at>$4", [id, revision, lease, Date.now()]);
       const row = result.rows[0];
-      const connection = row ? await eventConnection(row.grant_id, row.instance) : undefined;
+      const connection = row ? await workerConnection(row.grant_id, row.instance) : undefined;
       return row && connection ? { subscription: eventPayload(row), revision: row.revision, lease, connection } : null;
     },
     async saveEvent(id: string, revision: number, lease: string, state: EventState, delayMs: number, release: boolean) {

@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 
 import { createBroker } from "./broker.js";
+import { parseGalaxyLogins } from "./galaxy-login.js";
 
 function required(name: string) {
   const value = process.env[name];
@@ -22,6 +23,7 @@ try {
     resourceClientId: required("BROKER_RESOURCE_CLIENT_ID"),
     resourceClientSecret: required("BROKER_RESOURCE_CLIENT_SECRET"),
     instances: JSON.parse(required("GALAXY_INSTANCES_JSON")),
+    galaxyLogins: parseGalaxyLogins(process.env.BROKER_GALAXY_LOGINS_JSON),
     allowLoopback: process.env.BROKER_ALLOW_LOOPBACK === "1",
     trustProxy: process.env.BROKER_TRUST_PROXY === "1",
   });

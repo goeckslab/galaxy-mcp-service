@@ -22,6 +22,7 @@ Install workspace dependencies and build with `pnpm install --frozen-lockfile` a
 | `BROKER_RESOURCE_CLIENT_ID` | A distinct client ID used only by the MCP resource server. |
 | `BROKER_RESOURCE_CLIENT_SECRET` | A strong secret of at least 32 characters for that resource client. |
 | `GALAXY_INSTANCES_JSON` | JSON object mapping approved instance names to canonical HTTPS Galaxy base URLs. Use the same mapping on the MCP service. |
+| `BROKER_GALAXY_LOGINS_JSON` | Optional. JSON object of sites whose users can sign in instead of pasting an API key; see [Galaxy sign-in](#galaxy-sign-in). |
 
 Generate production secrets using the deployment's secret-management process. Do not put them in source control, build arguments, shell history, screenshots or logs. Do not generate new encryption, cookie or signing keys on each process start. Changing the encryption key makes existing state inaccessible; this implementation does not provide online encryption-key migration. Keep compatible signing and cookie key history when rotating those keys.
 
@@ -140,6 +141,20 @@ The authorization page labels `https://usegalaxy.org` as **US**. Form submission
 Users can [request another site through GitHub Issues](https://mcp.galaxyproject.org/support#request-site). Requests are public and should include the canonical HTTPS URL, institution, public operator contact and intended non-sensitive research use, never credentials or private data. Posting a request does not create a connection or enable a site automatically. The publisher reviews the public endpoint and API compatibility before enabling it. Private-network endpoints are outside this hosted list. Account-specific privacy and deletion requests use the separate [private contact form](https://mcp.galaxyproject.org/support#private-contact), not public Issues.
 
 Both MCP and broker must use the same approved map. The [release command](aws-deployment.md#routine-mcp-updates) supports reviewed additions with configuration rollback; existing aliases cannot be removed or remapped through that command. Adding a site does not expand saved grants. Users authorize their own account separately for each newly selected site.
+
+## Galaxy sign-in
+
+A site whose Galaxy accepts bearer tokens from an OpenID provider, such as test.galaxyproject.org with the `galaxy-test` realm at auth.usegalaxy.org, can offer sign-in in place of an API key. Configure it per site alias:
+
+```json
+{"test": {"issuer": "https://auth.usegalaxy.org/realms/galaxy-test", "client_id": "galaxy-mcp", "client_secret": "..."}}
+```
+
+The client is a confidential client of that provider with PKCE and the redirect URI `https://<broker host>/interaction/keycloak/callback`. The path sits under `/interaction/`, which the proxy already sends to the broker. The provider's tokens must carry the audience and scope that site's Galaxy accepts; at auth.usegalaxy.org that means listing the client in the realm's `api_clients`. An optional `scope` is requested in addition to `openid`. The provider's metadata is read on first use, so an unavailable provider does not stop the broker from starting. Only the broker for that host gets the setting; the legacy hostname leaves it empty.
+
+On the authorization page, such a site shows a choice to sign in instead of entering a key. API keys for the other selected sites are verified first. The browser then goes to each chosen provider and back; the broker exchanges the code, verifies the Galaxy account with the access token and returns to the same browser's interaction before the grant is saved. Galaxy accepts a sign-in only for an account that has logged in to that site with the same provider before; the page tells the user to do that once when Galaxy does not recognize the account.
+
+The provider's access and refresh tokens are stored encrypted with the grant's other credentials. Introspection returns `access_token` instead of `api_key` for that site, and the MCP service sends it to Galaxy as `Authorization: Bearer`. An access token with less than two minutes left is refreshed during introspection or when a run-event worker claims a subscription. Refreshes for one grant are serialized by a row lock, because the provider accepts each refresh token only once and ends the session when one is replayed. When the provider refuses a refresh, that site is left out of the grant until the user connects again; the grant's other sites keep working. A temporary provider failure keeps the current token. Removing the site or the grant does not end the provider session, which expires on its own.
 
 ## Connection lifetime and revocation
 

@@ -38,7 +38,10 @@ describe("AWS deployment boundary", () => {
     expect(legacyMcp.extends).toEqual({ service: "mcp" });
     expect(legacyBroker.extends).toEqual({ service: "broker" });
     expect(Object.keys(legacyMcp.environment).sort()).toEqual(["OAUTH_METADATA_URL", "PUBLIC_BASE_URL"]);
-    expect(Object.keys(legacyBroker.environment).sort()).toEqual(["BROKER_ISSUER", "BROKER_RESOURCE"]);
+    expect(Object.keys(legacyBroker.environment).sort()).toEqual(["BROKER_GALAXY_LOGINS_JSON", "BROKER_ISSUER", "BROKER_RESOURCE"]);
+    // Galaxy sign-in returns only to the registered hostname, so the original hostnames never offer it.
+    expect(legacyBroker.environment.BROKER_GALAXY_LOGINS_JSON).toBe("");
+    expect(broker.environment.BROKER_GALAXY_LOGINS_JSON).toBe("${BROKER_GALAXY_LOGINS_JSON:-}");
     expect(legacyBroker.environment.BROKER_RESOURCE).toBe(`${legacyMcp.environment.PUBLIC_BASE_URL}/mcp`);
     expect(legacyMcp.environment.OAUTH_METADATA_URL).toBe(`${legacyBroker.environment.BROKER_ISSUER}/.well-known/oauth-authorization-server`);
     expect(legacyMcp.depends_on["legacy-broker"].condition).toBe("service_healthy");

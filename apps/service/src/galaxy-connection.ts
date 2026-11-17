@@ -5,7 +5,9 @@ import { z } from "zod";
 export interface GalaxyConnection {
   instance?: string;
   baseUrl: string;
+  /** The API key, or with tokenType bearer the access token of the user's sign-in to this site. */
   apiKey: string;
+  tokenType?: "bearer" | undefined;
   fetchImpl?: typeof fetch;
 }
 
@@ -23,11 +25,13 @@ export function authenticatedGalaxies(authInfo: AuthInfo): GalaxyConnection[] {
   if (!Array.isArray(values) || !values.length || values.length > 10) return [];
   const parsed = z.array(z.object({
     instance: z.string().min(1).optional(), baseUrl: z.string().url(), apiKey: z.string().min(1),
+    tokenType: z.literal("bearer").optional(),
     fetchImpl: z.custom<typeof fetch>(value => typeof value === "function").optional(),
   })).safeParse(values);
   if (!parsed.success) return [];
   const connections = parsed.data.map(value => ({ baseUrl: value.baseUrl, apiKey: value.apiKey,
     ...(value.instance !== undefined && { instance: value.instance }),
+    ...(value.tokenType !== undefined && { tokenType: value.tokenType }),
     ...(value.fetchImpl !== undefined && { fetchImpl: value.fetchImpl }),
   }));
   return new Set(connections.map(value => connectionSource(value).instance)).size === connections.length ? connections : [];
@@ -53,8 +57,11 @@ export async function withGalaxy(
     index === 0 && item.type === "text" ? { ...item, text: JSON.stringify(structuredContent) } : item) };
 }
 
-/** The connection's fetch with this request's cancellation, a deadline per exchange, and no redirects. */
-export function requestFetch(connection: { fetchImpl?: typeof fetch }, signal: AbortSignal): typeof fetch {
+/**
+ * The connection's fetch with this request's cancellation, a deadline per exchange, and no redirects.
+ * A sign-in's access token goes to Galaxy as a bearer token where the API key header would have.
+ */
+export function requestFetch(connection: { fetchImpl?: typeof fetch; tokenType?: "bearer" | undefined }, signal: AbortSignal): typeof fetch {
   const fetchImpl = connection.fetchImpl ?? fetch;
   return (input, init) => {
     const requestSignal = AbortSignal.any([
@@ -65,12 +72,17 @@ export function requestFetch(connection: { fetchImpl?: typeof fetch }, signal: A
       AbortSignal.timeout(60_000),
     ]);
     requestSignal.throwIfAborted();
-    return fetchImpl(input, { ...init, redirect: "error", signal: requestSignal });
+    if (connection.tokenType !== "bearer") return fetchImpl(input, { ...init, redirect: "error", signal: requestSignal });
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const token = headers.get("x-api-key");
+    headers.delete("x-api-key");
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    return fetchImpl(input, { ...init, headers, redirect: "error", signal: requestSignal });
   };
 }
 
 export function createRequestGalaxyContext(
-  connection: { baseUrl: string; apiKey: string; fetchImpl?: typeof fetch },
+  connection: { baseUrl: string; apiKey: string; tokenType?: "bearer" | undefined; fetchImpl?: typeof fetch },
   signal: AbortSignal,
 ) {
   return createGalaxyContext({ baseUrl: connection.baseUrl, apiKey: connection.apiKey, signal, fetchImpl: requestFetch(connection, signal) });

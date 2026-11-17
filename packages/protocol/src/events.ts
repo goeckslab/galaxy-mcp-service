@@ -52,7 +52,8 @@ export const storedSubscription = z.object({
 }).strict();
 export const eventLease = z.object({
   subscription: storedSubscription, revision: z.number().int().positive(), lease: z.string(),
-  connection: z.object({ instance: z.string(), baseUrl: z.string().url(), apiKey: z.string().min(1) }).strict(),
+  // apiKey holds a sign-in's access token when tokenType is bearer.
+  connection: z.object({ instance: z.string(), baseUrl: z.string().url(), apiKey: z.string().min(1), tokenType: z.literal("bearer").optional() }).strict(),
 }).strict();
 export const subscriptionResult = z.object({ id: z.string(), refreshBefore: z.string().datetime(), cursor: z.null(), truncated: z.literal(false) }).strict();
 export type EventSubscription = z.infer<typeof storedSubscription>;

@@ -49,9 +49,11 @@ const activeTokenSchema = z
     aud: z.union([z.string(), z.array(z.string())]),
     client_id: z.string().min(1),
     exp: z.number().int(),
-    galaxy_connections: z.array(z.object({
-      instance: z.string().min(1), api_key: z.string().min(1), url: z.string().min(1),
-    }).strict()).min(1).max(10),
+    // Each site carries the user's API key, or the access token of their sign-in to that site.
+    galaxy_connections: z.array(z.union([
+      z.object({ instance: z.string().min(1), api_key: z.string().min(1), url: z.string().min(1) }).strict(),
+      z.object({ instance: z.string().min(1), access_token: z.string().min(1), url: z.string().min(1) }).strict(),
+    ])).min(1).max(10),
     iss: z.string().min(1),
     scope: z.union([z.string(), z.array(z.string())]),
     sub: z.string().min(1),
@@ -187,7 +189,8 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         throw new OAuthError(OAuthErrorCode.InvalidToken, "The access token is not valid for this service.");
       }
 
-      const connections = values.map(value => ({ instance: value.instance, baseUrl: instances.get(value.instance)!, apiKey: value.api_key, fetchImpl }));
+      const connections = values.map(value => ({ instance: value.instance, baseUrl: instances.get(value.instance)!, fetchImpl,
+        ...("access_token" in value ? { apiKey: value.access_token, tokenType: "bearer" as const } : { apiKey: value.api_key }) }));
       return {
         token,
         clientId: parsed.data.client_id,
