@@ -133,7 +133,7 @@ The metadata must advertise authorization code, PKCE `S256`, `galaxy:full` and a
 
 ## Curated Galaxy sites
 
-The hosted common-site list is maintained in [deploy/galaxy-instances.json](../deploy/galaxy-instances.json): US (`us`), Europe (`eu`), Australia (`au`), France (`fr`) and Canada (`ca`). These five public servers appear in the [Galaxy account guide](https://training.galaxyproject.org/training-material/faqs/galaxy/account_create.html). The directory is a discovery source, not an automatically trusted registry.
+The hosted common-site list is maintained in [deploy/galaxy-instances.json](../deploy/galaxy-instances.json): US (`us`), Europe (`eu`), Australia (`au`), France (`fr`) and Canada (`ca`), plus the Galaxy test server (`test`, `https://test.galaxyproject.org`). The five public servers appear in the [Galaxy account guide](https://training.galaxyproject.org/training-material/faqs/galaxy/account_create.html). The directory is a discovery source, not an automatically trusted registry.
 
 The authorization page labels `https://usegalaxy.org` as **US**. Form submissions, saved grants and MCP calls all use the `us` alias. Discover the current authorized aliases with `get_galaxy_connections` before selecting a site.
 

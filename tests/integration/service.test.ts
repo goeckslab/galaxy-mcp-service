@@ -54,6 +54,7 @@ describe("HTTP MCP service", () => {
     expect(home).toContain('href="https://usegalaxy.org.au"');
     expect(home).toContain('href="https://usegalaxy.fr"');
     expect(home).toContain('href="https://usegalaxy.ca"');
+    expect(home).toContain('href="https://test.galaxyproject.org"');
     expect(home).toContain('href="https://mcp.galaxyproject.org/connections"');
     expect(home).toContain("<code>https://mcp.galaxyproject.org/mcp</code>");
     expect(home).toContain("ask naturally to remove a site, rotate a key or disconnect Galaxy");
