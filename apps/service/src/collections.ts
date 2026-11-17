@@ -84,7 +84,6 @@ async function createCollection(args: z.infer<typeof input>, connection: GalaxyC
 
 export function registerCollections(server: McpServer, connections: GalaxyConnection[]) {
   server.registerTool("create_collection", {
-    title: "Create Galaxy collection",
     description: "Group datasets already in one history into a new list, paired or list:paired collection, as workflows and batch tools expect. The datasets stay in the history; nothing is uploaded, moved or deleted. Check that each dataset is ready with get_history_contents first.",
     inputSchema: input.extend(instanceInput), outputSchema: output.extend(sourceOutput),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

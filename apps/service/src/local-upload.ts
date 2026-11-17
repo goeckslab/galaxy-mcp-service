@@ -114,12 +114,12 @@ export function registerLocalUpload(server: McpServer, connections: GalaxyConnec
     _meta: { ui: { visibility: ["app"] } },
   };
   server.registerTool("start_file_upload", {
-    ...shared, title: "Start a file upload",
+    ...shared,
     description: "Used by the Galaxy card's Upload button: open a resumable upload on the Galaxy site for a file the user chose. The card sends the bytes from the browser straight to Galaxy; they do not pass through this service or the assistant.",
     inputSchema: startInput.extend(instanceInput), outputSchema: startOutput.extend(sourceOutput),
   }, ({ instance, ...args }, ctx) => withGalaxy(instance, connections, connection => startFileUpload(args, connection, ctx.mcpReq.signal)));
   server.registerTool("finish_file_upload", {
-    ...shared, title: "Finish a file upload",
+    ...shared,
     description: "Used by the Galaxy card's Upload button: once the browser has sent the whole file, add it to the history as a dataset. Galaxy detects the format. An incomplete upload creates nothing.",
     inputSchema: finishInput.extend(instanceInput), outputSchema: finishOutput.extend(sourceOutput),
   }, ({ instance, ...args }, ctx) => withGalaxy(instance, connections, connection => finishFileUpload(args, connection, ctx.mcpReq.signal)));

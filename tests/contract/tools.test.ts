@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { productOperations } from "../../apps/service/src/mcp.js";
 import { HISTORY_SUMMARY_URI } from "../../apps/service/src/history-summary-ui.js";
+import { toolTitles } from "../../apps/service/src/tool-titles.js";
 import { postModern, startTestService } from "../helpers/service.js";
 
 let baseUrl: string;
@@ -16,6 +17,20 @@ beforeAll(async () => {
 afterAll(async () => stop());
 
 describe("Galaxy tool contract", () => {
+  it("names every tool for directory listings, in both title and annotations.title", async () => {
+    const { result } = await (await postModern(baseUrl, "tools/list")).json() as {
+      result: { tools: Array<{ name: string; title?: string; annotations: { title?: string } }> };
+    };
+    for (const tool of result.tools) {
+      expect(tool.title, tool.name).toBe(toolTitles[tool.name]);
+      expect(tool.annotations.title, tool.name).toBe(tool.title);
+    }
+    // Only a broker-authenticated service also lists the connection-management tool.
+    const listed = new Set(result.tools.map(({ name }) => name));
+    expect(Object.keys(toolTitles).filter(name => !listed.has(name))).toEqual(["get_connection_management_link"]);
+    expect(new Set(Object.values(toolTitles)).size).toBe(Object.keys(toolTitles).length);
+  });
+
   it("exposes the real Galaxy product surface with accurate annotations", async () => {
     const response = await postModern(baseUrl, "tools/list");
     const payload = (await response.json()) as {

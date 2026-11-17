@@ -23,6 +23,7 @@ import { registerLocalUpload } from "./local-upload.js";
 import { historyPurposeInput, recordHistoryPurpose, recordRunPurpose, runPurposeInput } from "./run-purpose.js";
 import { registerRunEvents } from "./events.js";
 import type { EventRequest } from "@galaxy-mcp-service/protocol";
+import { toolTitles } from "./tool-titles.js";
 
 export type { GalaxyConnection } from "./galaxy-connection.js";
 
@@ -600,6 +601,16 @@ type ToolHandler = (args: Record<string, unknown>, ctx: unknown) => CallToolResu
  * Agents often call these tools with Galaxy's own snake_case names, history_id for historyId,
  * so every tool registered on this server accepts both. Handlers still see camelCase names.
  */
+/** Gives every tool its listed title, also as annotations.title, which the Claude directory reads. */
+function useToolTitles(server: McpServer): void {
+  const register = server.registerTool.bind(server) as (name: string, config: { title?: string; annotations?: object }, handler: ToolHandler) => unknown;
+  server.registerTool = ((name: string, config: { title?: string; annotations?: object }, handler: ToolHandler) => {
+    const title = toolTitles[name];
+    if (!title) throw new Error(`Tool ${name} needs a title in tool-titles.ts.`);
+    return register(name, { ...config, title, annotations: { ...config.annotations, title } }, handler);
+  }) as McpServer["registerTool"];
+}
+
 function acceptSnakeCaseNames(server: McpServer): void {
   const register = server.registerTool.bind(server) as (name: string, config: { inputSchema?: unknown }, handler: ToolHandler) => unknown;
   server.registerTool = ((name: string, config: { inputSchema?: unknown }, handler: ToolHandler) => {
@@ -618,7 +629,6 @@ function registerGalaxyOperation(server: McpServer, operation: AnyOperation, con
   server.registerTool(
     name,
     {
-      title: name.replaceAll("_", " "),
       description: operation.name === "get_history_contents"
         ? (rendersHistoryContents ? "Show one interactive history card for user browsing; prefer this over separate cards for each dataset. " : "Read history data without creating a card. Use for intermediate lookups and report discovery; show_history is the separate presentation action. ") + "Return compact dataset/collection summaries or find candidates by name/format. Hidden and deleted items are left out unless asked for, as in Galaxy's history panel. Filtered lookup inspects at most 500 items per call; continue from pagination.next_offset with the same filters. A partial or empty page does not prove absence or uniqueness. Use show_dataset only when a standalone report card is needed."
         : operation.name === "get_dataset_details"
@@ -669,17 +679,16 @@ export function createGalaxyMcpHandler(
         instructions: "Galaxy tools work without UI. Use get_galaxy_connections; keep instance with handles. No transfers without consent. Reads are card-free. show_galaxy opens a panel; prefer controls or one show_* per reply, never per poll. Display is unconfirmed. Read evidence: get_dataset_text or read_dataset_report. Use names, disclose gaps. Inspect inputs; submit once, monitor. Events are opt-in for an existing run, not result validation. Management links on request. Confirm destructive actions. Never expose credentials.",
       });
       acceptSnakeCaseNames(server);
+      useToolTitles(server);
 
       registerHistorySummaryResource(server, uiDomain, authOrigin, [...new Set(connections.map(connection => new URL(connection.baseUrl).origin))]);
       server.registerTool("get_galaxy_connections", {
-        title: "Connected Galaxy sites",
         description: "List only the Galaxy instances authorized for this connection, with their routing aliases and URLs; no credentials. Select an instance explicitly on every call when more than one is connected. Histories and identifiers belong to their source site; this does not transfer data between sites.",
         inputSchema: z.object({}).strict(),
         outputSchema: z.object({ connections: z.array(galaxySource) }),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       }, () => structured({ connections: connections.map(connectionSource) }));
       server.registerTool("show_galaxy", {
-        title: "Galaxy workspace",
         description: "Open the Galaxy panel to browse authorized sites, histories and reports without adding a card for each lookup. Can also open an existing analysis using kind and runId together. Never submits an analysis. Clients without Plugin Extensions can use the same MCP Apps view or the read-only tools.",
         inputSchema: z.object({ ...instanceInput, kind: runStatusInput.shape.kind.optional(), runId: runStatusInput.shape.runId.optional() }).strict(),
         outputSchema: z.object({ view: z.literal("workspace"), connections: z.array(galaxySource), initial: z.unknown().optional(), management_available: z.boolean(), presentation: presentationOutput.optional() }),
@@ -704,7 +713,6 @@ export function createGalaxyMcpHandler(
       if (authInfo !== undefined && createManagementLink !== undefined) server.registerTool(
         "get_connection_management_link",
         {
-          title: "Manage Galaxy connections",
           description: "Create a one-time link, valid for five minutes, for the user to view or disconnect Galaxy sites authorized by this plugin identity. Use only when the user asks to manage, remove, rotate or revoke a connection. Creating the link changes no Galaxy access by itself.",
           inputSchema: z.object({}).strict(),
           outputSchema: z.object({ url: z.string().url(), expires_in: z.number().int().positive(), message: z.string() }),
@@ -726,7 +734,6 @@ export function createGalaxyMcpHandler(
       for (const name of ["get_histories", "show_histories"]) server.registerTool(
         name,
         {
-          title: name === "show_histories" ? "Show Galaxy histories" : "Read Galaxy histories",
           description: name === "show_histories"
             ? "Show one interactive history selector, initially five histories, with Load more / Load less. Use when the user needs to browse or choose a history, not for intermediate lookups. Display remains unconfirmed."
             : "Read a bounded page of recent histories without creating a card. Defaults to five; continue with pagination.next_offset. Use show_histories only when a user-facing selector is needed.",
@@ -757,7 +764,6 @@ export function createGalaxyMcpHandler(
       server.registerTool(
         "show_dataset",
         {
-          title: "Request Galaxy report display",
           description: "Request a viewer for a known completed dataset: HTML, PDF, images, tables or text. Unsupported/binary files retain their metadata and original Galaxy link. Resolve ambiguous names first. Success means display requested, never opened/shown/visible. UI feedback must match this result's presentation.view_id and still does not prove visibility. Read evidence separately with get_dataset_text or read_dataset_report.",
           inputSchema: z.object({ datasetId: z.string().trim().min(1).max(512), ...instanceInput }).strict(),
           outputSchema: operationOutput.extend(sourceOutput),
@@ -769,7 +775,6 @@ export function createGalaxyMcpHandler(
       for (const name of ["get_run_status", "show_run_status"]) server.registerTool(
         name,
         {
-          title: "Galaxy run status",
           description: (name === "show_run_status" ? "Show one status card for an existing analysis when the user needs visible progress; it can refresh in place. " : "Read an existing analysis status without creating a card. Use for background monitoring and verification; show_run_status is the separate presentation action. ") + "Refreshing never submits, cancels, or retries an analysis. Completed means execution succeeded, not that the scientific result has been validated.",
           inputSchema: runStatusInput.extend(instanceInput),
           outputSchema: runStatusOutput.extend(sourceOutput),
@@ -797,7 +802,6 @@ export function createGalaxyMcpHandler(
       server.registerTool(
         "get_dataset_text",
         {
-          title: "get dataset text",
           description:
             "Read bounded machine-readable text from a completed analysis result. After get_history_contents, use this on FastQC RawData or another txt/tabular/csv/tsv output before judging the result; do not use it on raw sequencing inputs.",
           inputSchema: datasetTextInput.extend(instanceInput),
@@ -814,7 +818,6 @@ export function createGalaxyMcpHandler(
       server.registerTool(
         "get_dataset_html",
         {
-          title: "get dataset HTML",
           description: "Load a completed HTML analysis report for a static, non-executable card preview; the original report is available through its Galaxy link.",
           inputSchema: datasetHtmlInput.extend(instanceInput),
           outputSchema: datasetHtmlOutput.extend(sourceOutput),
