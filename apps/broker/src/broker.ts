@@ -216,7 +216,7 @@ export async function createBroker(config: BrokerConfig) {
       <a class="help" href="${escape(url)}/user/api_key" target="_blank" rel="noopener noreferrer">Find your API key on ${host}</a></div>`;
     const choice = logins.has(name)
       ? `<label class="option"><input type="radio" name="method.${escape(name)}" value="login" checked>Sign in with your ${host} account<span class="badge">Recommended</span></label>
-        <p class="hint first">First time? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in to ${host} with Keycloak</a> once, then come back here.</p>
+        <p class="hint first">Never used Keycloak on ${host}? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in there with Keycloak</a> once first, then come back here.</p>
         <label class="option"><input type="radio" name="method.${escape(name)}" value="key">Use an API key instead</label>${key}`
       : key;
     const pick = fixed
@@ -419,7 +419,9 @@ export async function createBroker(config: BrokerConfig) {
     };
     const continuePage = (target: string, text: string) => {
       ctx.type = "html";
-      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escape(target)}"><title>${escape(text)}</title><p><a href="${escape(target)}">${escape(text)}</a></p></html>`;
+      // Usually replaced at once by the next page; a slow connection shows this card with a manual link.
+      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(target)}"><title>${escape(text)}</title><style>${cardStyle}</style>`
+        + `<main><h1>${escape(text)}</h1><p>This should take a moment. If nothing happens, continue here.</p><a class="button" href="${escape(target)}">Continue</a></main></html>`;
     };
     /** Galaxy's own account id for a key or a sign-in's access token. */
     const galaxyUser = async (baseUrl: string, headers: Record<string, string>) => {
@@ -459,7 +461,7 @@ export async function createBroker(config: BrokerConfig) {
         state, redirectUri: loginCallback, challenge: createHash("sha256").update(verifier).digest("base64url"),
       });
       await signInStore.upsert(state, { ...pending, step: "authorize", verifier }, 600);
-      continuePage(target, `Sign in to ${instances.get(instance)}`);
+      continuePage(target, `Signing in to ${new URL(instances.get(instance)!).host}…`);
     };
     const managementCsp = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
     const managementError = () => {
@@ -474,7 +476,7 @@ export async function createBroker(config: BrokerConfig) {
     };
     type Managed = { accountId: string; sourceGrant: string };
     type Target = Managed & { targetGrant: string };
-    const manageStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer;background:#0068da;color:white}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}.actions{display:flex;gap:8px;flex:none}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}.status.warn{background:#fdecc8;color:#7a4a00}.alias{font-size:13px;color:#6e6e73}.add{margin:4px 0 20px}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}";
+    const manageStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer;background:#0068da;color:white}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}.actions{display:flex;gap:8px;flex:none}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}.status.warn{background:#fdecc8;color:#7a4a00}.add{margin:4px 0 20px}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}";
     const actionButton = (token: string, text: string, className = "") =>
       `<form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button${className ? ` class="${className}"` : ""}>${escape(text)}</button></form>`;
     const clientLabelFor = (clientId: string) =>
@@ -491,14 +493,14 @@ export async function createBroker(config: BrokerConfig) {
           const { instance, baseUrl, expired } = connection;
           const change = await actionToken({ ...target, operation: "edit", instance });
           const remove = await actionToken({ ...target, operation: "remove", instance });
-          return `<li><div><strong>${escape(siteName(instance))}</strong>${siteName(instance) === instance ? "" : ` <span class="alias">${escape(instance)}</span>`}<span class="status${expired ? " warn" : ""}">${escape(methodLabel(connection))}</span><br><a href="${escape(baseUrl)}" target="_blank" rel="noopener noreferrer">${escape(baseUrl)}</a></div>
+          return `<li><div><strong>${escape(siteName(instance))}</strong><span class="status${expired ? " warn" : ""}">${escape(methodLabel(connection))}</span><br><a href="${escape(baseUrl)}" target="_blank" rel="noopener noreferrer">${escape(baseUrl)}</a></div>
             <div class="actions">${actionButton(change, expired ? "Sign in again" : "Change")}${actionButton(remove, "Remove site", "secondary")}</div></li>`;
         }));
         const addable = [...instances.keys()].some(name => !credential.connections.some(value => value.instance === name))
           && credential.connections.length < MAX_CONNECTIONS;
         const add = addable ? actionButton(await actionToken({ ...target, operation: "edit" }), "Add a Galaxy site") : "";
         const revoke = await actionToken({ ...target, operation: "revoke" });
-        card = `<section><h2>${escape(clientLabelFor(credential.clientId))}</h2><p>Can browse Galaxy data and run analyses. Expires ${escape(new Date(credential.expiresAt).toISOString())}.</p><ul>${sites.join("")}</ul>
+        card = `<section><h2>${escape(clientLabelFor(credential.clientId))}</h2><p>Can browse Galaxy data and run analyses. Expires on ${escape(new Date(credential.expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }))}.</p><ul>${sites.join("")}</ul>
           <div class="add">${add}</div>${actionButton(revoke, "Disconnect this client", "danger")}</section>`;
       }
       ctx.set("Referrer-Policy", "same-origin");
@@ -571,7 +573,7 @@ export async function createBroker(config: BrokerConfig) {
         // Its form POST needs a non-null Origin, as on the consent page.
         ctx.set("Referrer-Policy", "same-origin");
         ctx.type = "html";
-        ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open Galaxy connection management</title><style>body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:560px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}p{line-height:1.5;color:#555}button{font:inherit;width:100%;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;cursor:pointer}</style><main><h1>Manage Galaxy connections</h1><p>Continue to view the Galaxy sites authorized by your active plugin connection. This private link works once and does not use a browser login cookie.</p><form method="post" action="/connections/start"><input type="hidden" name="ticket" value="${ticketMatch[1]}"><button>Continue</button></form></main></html>`;
+        ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Open Galaxy connection management</title><style>${cardStyle}</style><main><h1>Manage Galaxy connections</h1><p>Continue to see and change the Galaxy sites this AI app can use. This private link works once and does not use a browser login cookie.</p><form method="post" action="/connections/start"><input type="hidden" name="ticket" value="${ticketMatch[1]}"><button class="button">Continue</button></form></main></html>`;
       } catch { managementError(); }
       return;
     }
@@ -722,7 +724,7 @@ export async function createBroker(config: BrokerConfig) {
         const finish = async (result: Parameters<Provider["interactionResult"]>[2]) => {
           await provider.interactionResult(ctx.req, ctx.res, result, { mergeWithLastSubmission: false });
           // End the form submission before OAuth redirects; keep form-action restricted to this origin.
-          continuePage(returnTo.href, "Continue connecting Galaxy");
+          continuePage(returnTo.href, "Finishing your Galaxy connection…");
         };
         /** Saves the complete, verified set of sites as one grant and returns to the AI app. */
         const complete = async (connections: Connection[], users: Record<string, string>) => {

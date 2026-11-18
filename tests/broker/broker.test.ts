@@ -1031,7 +1031,7 @@ describe("durable Galaxy credential broker", () => {
     try {
       const form = await authorization();
       expect(form.html).not.toContain('name="method.us"');
-      expect(form.html).toContain(`First time? <a href="${signInConfig.instances.test}/login/start"`);
+      expect(form.html).toContain(`Never used Keycloak on ${new URL(signInConfig.instances.test!).host}? <a href="${signInConfig.instances.test}/login/start"`);
       // Ticking the site opens it with signing in chosen; the API key is the other choice.
       expect(form.html).toMatch(/name="site\.test" value="yes">[^]*name="method\.test" value="login" checked>[^]*name="method\.test" value="key">Use an API key instead[^]*name="api_key\.test"/);
       expect(form.html).toContain(`href="${config.instances.us}/user/api_key"`);
@@ -1144,7 +1144,7 @@ describe("durable Galaxy credential broker", () => {
       const managing = new Browser();
       const addForm = await (await managementPost("action", { action_token: buttonToken(await managementPage(plain.access_token, managing), "Add a Galaxy site")! }, managing)).text();
       expect(addForm).toContain('name="method.test"');
-      expect(addForm).toContain("First time?");
+      expect(addForm).toContain("Never used Keycloak on");
       const addSave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(addForm)![1]!;
       const leaving = await managementPost("save", { action_token: addSave, consent: "yes", "login.test": "yes" }, managing);
       expect(leaving.status).toBe(200);
