@@ -925,6 +925,7 @@ describe("durable Galaxy credential broker", () => {
       expect(form.html).toContain('name="login.test"');
       expect(form.html).not.toContain('name="login.us"');
       expect(form.html).toContain("chose to sign in");
+      expect(form.html).toContain(`First time? <a href="${signInConfig.instances.test}/login/start"`);
       // Signing in is offered first; the key field for that site sits behind "Use an API key instead".
       expect(form.html).toMatch(/name="login\.test"[^]*<details><summary>Use an API key instead<\/summary><input id="key-test" name="api_key\.test"/);
       expect(form.html).toContain("return to <strong>client-a on this computer (127.0.0.1)</strong>");
@@ -988,7 +989,8 @@ describe("durable Galaxy credential broker", () => {
       expect(refused.status).toBe(400);
       expect(refused.headers.get("content-type")).toContain("text/html");
       const refusal = await refused.text();
-      expect(refusal).toContain("does not recognize this sign-in yet.");
+      expect(refusal).toContain("has not seen this account yet.");
+      expect(refusal).toContain("<ol><li>Open 127.0.0.1:");
       expect(refusal).toContain(`href="${signInConfig.instances.test}/login/start"`);
       // The same browser can go back to the form and try again while the interaction lasts.
       const backTo = /<a class="button secondary" href="([^"]+)">Back to Connect Galaxy<\/a>/.exec(refusal)![1]!;

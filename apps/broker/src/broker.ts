@@ -96,22 +96,24 @@ async function readForm(req: IncomingMessage, allowed: ReadonlySet<string>) {
 
 /** A connection failure the person connecting can act on; its message is shown to them. */
 class ConnectionProblem extends Error {
-  constructor(message: string, readonly title = "Galaxy is not connected yet", readonly action?: { href: string; text: string }) {
+  constructor(message: string, readonly title = "Galaxy is not connected yet",
+    readonly action?: { href: string; text: string }, readonly steps: string[] = []) {
     super(message);
   }
 }
 
-const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}h1{margin-top:0;font-size:26px}p,small{line-height:1.5}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}";
+const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}h1{margin-top:0;font-size:26px}p,small,li{line-height:1.5}ol{padding-left:22px}li{margin:6px 0}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}";
 
 /**
  * A short card explaining why connecting stopped and what to do next.
  * `back` reopens the connection form, which stays valid for the interaction's ten minutes.
  */
 function problemPage(problem: unknown, fallback: string, back?: string) {
-  const { title, message, action } = problem instanceof ConnectionProblem ? problem
-    : { title: "Galaxy is not connected yet", message: fallback, action: undefined };
+  const { title, message, action, steps } = problem instanceof ConnectionProblem ? problem
+    : { title: "Galaxy is not connected yet", message: fallback, action: undefined, steps: [] };
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title><style>${cardStyle}</style>`
     + `<main><h1>${escape(title)}</h1><p>${escape(message)}</p>`
+    + (steps.length ? `<ol>${steps.map(step => `<li>${escape(step)}</li>`).join("")}</ol>` : "")
     + (action ? `<a class="button" href="${escape(action.href)}" target="_blank" rel="noopener noreferrer">${escape(action.text)}</a>` : "")
     + (back ? `<a class="button${action ? " secondary" : ""}" href="${escape(back)}">Back to Connect Galaxy</a>` : "")
     + "</main></html>";
@@ -459,8 +461,12 @@ export async function createBroker(config: BrokerConfig) {
         if (/at least once/i.test(message)) {
           const host = new URL(baseUrl).host;
           throw new ConnectionProblem(
-            `${host} does not recognize this sign-in yet. Galaxy accepts it only for an account that has logged in to ${host} with Keycloak before. Log in there once, then go back and connect again.`,
-            `Log in to ${host} once`, { href: `${baseUrl}/login/start`, text: `Open ${host}` });
+            `Your Keycloak sign-in worked, but ${host} has not seen this account yet. Galaxy accepts the sign-in only after you have used it on ${host} once.`,
+            `Log in to ${host} once`, { href: `${baseUrl}/login/start`, text: `Open ${host}` }, [
+              `Open ${host} and choose Keycloak on its login page. A new Galaxy account is created if you do not have one.`,
+              `If you already have a ${host} account with a password, log in with it instead, then link Keycloak under User → Preferences → Manage Third-Party Identities.`,
+              "Come back to this tab and select Back to Connect Galaxy.",
+            ]);
         }
         throw new errors.InvalidRequest("Galaxy identity could not be verified.");
       }
@@ -585,6 +591,7 @@ export async function createBroker(config: BrokerConfig) {
             // Signing in is this site's usual way to connect; an API key stays one click away.
             return `<fieldset class="site"><legend>${escape(label)} — ${escape(url)}</legend>
               <label class="choice"><input type="checkbox" name="login.${escape(name)}" value="yes">Sign in with my ${escape(new URL(url).host)} account (Keycloak)</label>
+              <p class="hint">First time? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in to ${escape(new URL(url).host)} with Keycloak</a> once, then come back here.</p>
               <details><summary>Use an API key instead</summary>${key(false)}</details></fieldset>`;
           }).join("");
           const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(callbackHost);
@@ -595,7 +602,7 @@ export async function createBroker(config: BrokerConfig) {
             <p>After authorization, you will return to <strong>${loopback ? `${escape(clientLabel)} on this computer (${escape(callbackHost)})` : escape(callbackHost)}</strong>.</p>
             <form method="post" action="/interaction/${escape(details.uid)}"><input type="hidden" name="csrf" value="${csrf}">
             <p>Choose from the ${instances.size} enabled Galaxy sites below. For each site you want to authorize, enter your own API key${offersSignIn ? " or choose to sign in" : ""}; leave other sites blank. Each connection can include up to 10 sites. Keys belong to their individual servers; do not reuse a key on another server.</p>${fields}
-            ${offersSignIn ? "<p class=\"hint\">Signing in takes you to the site's login page and back. Galaxy accepts it only for an account that has already logged in to that site with its Keycloak option.</p>" : ""}
+            ${offersSignIn ? "<p class=\"hint\">Signing in takes you to the site's login page and back.</p>" : ""}
             <p>Your keys are encrypted and kept for this connection for up to 30 days. They are shared only with the Galaxy MCP service, never with the AI client. Revoking this connection removes all its saved keys; simply removing an app may not send a revocation request. Your Galaxy accounts and data are not deleted. To add or replace a server, reconnect with the desired set; existing authorizations are not expanded. You can remove a server from the management page after connecting.</p>
             <label class="consent"><input type="checkbox" name="consent" value="yes" required>I allow this client to read my Galaxy data and run analyses on every server for which I entered a key${offersSignIn ? " or chose to sign in" : ""}.</label>
             <button name="action" value="connect">Connect Galaxy</button><button name="action" value="cancel" formnovalidate>Cancel</button></form>
