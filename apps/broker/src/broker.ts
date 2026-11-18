@@ -102,22 +102,23 @@ class ConnectionProblem extends Error {
   }
 }
 
-const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}h1{margin-top:0;font-size:26px}p,small,li{line-height:1.5}ol{padding-left:22px}li{margin:6px 0}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}button.button{display:block;width:100%;box-sizing:border-box;font:inherit;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;margin-top:20px;cursor:pointer}button.button.secondary{background:#eee;color:#222;margin-top:12px}";
+const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001;overflow-wrap:anywhere}@media(max-width:520px){body{padding:12px}main{padding:22px;margin:2vh auto}}h1{margin-top:0;font-size:26px}p,small,li{line-height:1.5}ol{padding-left:22px}li{margin:6px 0}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}button.button{display:block;width:100%;box-sizing:border-box;font:inherit;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;margin-top:20px;cursor:pointer}button.button.secondary{background:#eee;color:#222;margin-top:12px}";
 
 const formStyle = [
   "label{display:block}button{box-sizing:border-box;font:inherit;width:100%;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;margin-top:12px;cursor:pointer}",
   "button[value=cancel],button.secondary{background:#eee;color:#222}input[type=checkbox],input[type=radio]{margin:0;width:18px;height:18px;flex:none;accent-color:#0068da}",
   ".sites{display:grid;gap:10px;margin:16px 0 20px}.site{border:1px solid #d2d2d7;border-radius:14px;padding:14px 16px}",
   ".site:has(.pick input:checked),.site.fixed{border-color:#0068da;background:#f5f9ff}",
-  ".pick{display:flex;align-items:center;gap:12px;cursor:pointer}.name{font-weight:600}.host{color:#6e6e73;font-size:14px;margin-left:auto;text-align:right}",
-  ".details{display:grid;gap:10px;margin:12px 0 0 30px}.option{display:flex;align-items:center;gap:10px;cursor:pointer}",
+  // Long host names and status labels wrap instead of widening the card.
+  ".site{min-width:0;overflow-wrap:anywhere}.pick{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;cursor:pointer}.name{font-weight:600}.host{color:#6e6e73;font-size:14px;margin-left:auto;text-align:right}",
+  ".details{display:grid;gap:10px;margin:12px 0 0 30px}.option{display:flex;align-items:flex-start;gap:10px;cursor:pointer}.option>span{min-width:0;line-height:1.4}.option input{margin-top:1px}",
   ".badge{font-size:12px;background:#e3f0ff;color:#0058b9;border-radius:999px;padding:2px 8px;white-space:nowrap}",
   ".key input{box-sizing:border-box;width:100%;font:inherit;padding:10px 12px;border:1px solid #b8b8bd;border-radius:10px;background:white}",
   ".help{display:inline-block;font-size:14px;margin-top:6px}.hint{font-size:14px;color:#555;margin:0}",
-  ".status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;white-space:nowrap}",
+  ".status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px}",
   "label.consent{display:flex;gap:10px;align-items:flex-start;margin-top:4px}label.consent input{margin-top:3px}",
   "details.more{margin-top:24px;color:#555;font-size:15px}details.more summary{cursor:pointer;color:#0068da}details.more p{margin:10px 0}.small{font-size:14px;color:#6e6e73}",
-  "@media(max-width:520px){body{padding:12px}main{padding:22px;margin:2vh auto}.pick{flex-wrap:wrap;row-gap:2px}.host{width:100%;margin-left:30px;text-align:left}.fixed .host{margin-left:0}.details{margin-left:0}}",
+  "@media(max-width:520px){.host{width:100%;margin-left:30px;text-align:left}.fixed .host{margin-left:0}.details{margin-left:0}}",
   // Without :has() every site stays open, which still works.
   "@supports selector(:has(*)){.site:not(.fixed):not(:has(.pick input:checked)) .details{display:none}",
   ".site:has(input[value=login]:checked) .key{display:none}.site:has(input[value=key]:checked) .first{display:none}}",
@@ -215,9 +216,9 @@ export async function createBroker(config: BrokerConfig) {
     const key = `<div class="key"><input id="key-${escape(name)}" name="api_key.${escape(name)}" type="password" autocomplete="off" maxlength="4096" placeholder="Paste your ${host} API key" aria-label="API key for ${label}">
       <a class="help" href="${escape(url)}/user/api_key" target="_blank" rel="noopener noreferrer">Find your API key on ${host}</a></div>`;
     const choice = logins.has(name)
-      ? `<label class="option"><input type="radio" name="method.${escape(name)}" value="login" checked>Sign in with your ${host} account<span class="badge">Recommended</span></label>
+      ? `<label class="option"><input type="radio" name="method.${escape(name)}" value="login" checked><span>Sign in with your ${host} account <span class="badge">Recommended</span></span></label>
         <p class="hint first">Never used Keycloak on ${host}? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in there with Keycloak</a> once first, then come back here.</p>
-        <label class="option"><input type="radio" name="method.${escape(name)}" value="key">Use an API key instead</label>${key}`
+        <label class="option"><input type="radio" name="method.${escape(name)}" value="key"><span>Use an API key instead</span></label>${key}`
       : key;
     const pick = fixed
       ? `<input type="hidden" name="site.${escape(name)}" value="yes"><div class="pick">${heading}</div>`
@@ -476,7 +477,7 @@ export async function createBroker(config: BrokerConfig) {
     };
     type Managed = { accountId: string; sourceGrant: string };
     type Target = Managed & { targetGrant: string };
-    const manageStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer;background:#0068da;color:white}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}.actions{display:flex;gap:8px;flex:none}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}.status.warn{background:#fdecc8;color:#7a4a00}.add{margin:4px 0 20px}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}";
+    const manageStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}li>div:first-child{min-width:0;overflow-wrap:anywhere}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer;background:#0068da;color:white}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}.actions{display:flex;gap:8px;flex:none}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}.status.warn{background:#fdecc8;color:#7a4a00}.add{margin:4px 0 20px}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}";
     const actionButton = (token: string, text: string, className = "") =>
       `<form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button${className ? ` class="${className}"` : ""}>${escape(text)}</button></form>`;
     const clientLabelFor = (clientId: string) =>

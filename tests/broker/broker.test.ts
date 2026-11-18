@@ -1033,7 +1033,7 @@ describe("durable Galaxy credential broker", () => {
       expect(form.html).not.toContain('name="method.us"');
       expect(form.html).toContain(`Never used Keycloak on ${new URL(signInConfig.instances.test!).host}? <a href="${signInConfig.instances.test}/login/start"`);
       // Ticking the site opens it with signing in chosen; the API key is the other choice.
-      expect(form.html).toMatch(/name="site\.test" value="yes">[^]*name="method\.test" value="login" checked>[^]*name="method\.test" value="key">Use an API key instead[^]*name="api_key\.test"/);
+      expect(form.html).toMatch(/name="site\.test" value="yes">[^]*name="method\.test" value="login" checked>[^]*name="method\.test" value="key"><span>Use an API key instead<\/span>[^]*name="api_key\.test"/);
       expect(form.html).toContain(`href="${config.instances.us}/user/api_key"`);
       expect(form.html).toContain("return to <strong>client-a on this computer (127.0.0.1)</strong>");
 
