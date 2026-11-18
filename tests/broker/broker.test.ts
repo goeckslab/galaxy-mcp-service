@@ -925,6 +925,9 @@ describe("durable Galaxy credential broker", () => {
       expect(form.html).toContain('name="login.test"');
       expect(form.html).not.toContain('name="login.us"');
       expect(form.html).toContain("chose to sign in");
+      // Signing in is offered first; the key field for that site sits behind "Use an API key instead".
+      expect(form.html).toMatch(/name="login\.test"[^]*<details><summary>Use an API key instead<\/summary><input id="key-test" name="api_key\.test"/);
+      expect(form.html).toContain("return to <strong>client-a on this computer (127.0.0.1)</strong>");
 
       const { auth, back } = await connect({ "login.test": "yes", "api_key.us": keys.us });
       const returned = await auth.browser.request(back);
@@ -983,7 +986,15 @@ describe("durable Galaxy credential broker", () => {
       const unlinked = await connect({ "login.test": "yes" });
       const refused = await unlinked.auth.browser.request(unlinked.back);
       expect(refused.status).toBe(400);
-      expect(await refused.text()).toContain("does not recognize this sign-in yet. Log in to");
+      expect(refused.headers.get("content-type")).toContain("text/html");
+      const refusal = await refused.text();
+      expect(refusal).toContain("does not recognize this sign-in yet.");
+      expect(refusal).toContain(`href="${signInConfig.instances.test}/login/start"`);
+      // The same browser can go back to the form and try again while the interaction lasts.
+      const backTo = /<a class="button secondary" href="([^"]+)">Back to Connect Galaxy<\/a>/.exec(refusal)![1]!;
+      const again = await unlinked.auth.browser.request(new URL(backTo, config.issuer).href);
+      expect(again.status).toBe(200);
+      expect(await again.text()).toContain('name="login.test"');
 
       // Cancelling at the provider, a replayed callback, and a key together with sign-in for one site are refused.
       provider.nextUser = "signin-user";
@@ -993,8 +1004,12 @@ describe("durable Galaxy credential broker", () => {
       expect(await (await cancelled.auth.browser.request(url.href)).text()).toContain("was not completed");
       expect((await cancelled.auth.browser.request(cancelled.back)).status).toBe(400);
       const both = await authorization();
-      expect((await both.browser.request(both.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ csrf: both.csrf, consent: "yes", action: "connect", "login.test": "yes", "api_key.test": "fixture-other-key" }) })).status).toBe(400);
+      const bothRefused = (await both.browser.request(both.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrf: both.csrf, consent: "yes", action: "connect", "login.test": "yes", "api_key.test": "fixture-other-key" }) }));
+      expect(bothRefused.status).toBe(400);
+      const bothText = await bothRefused.text();
+      expect(bothText).toContain("Choose one way to connect");
+      expect(bothText).toContain(`<a class="button" href="/interaction/`);
     } finally {
       vi.useRealTimers();
       await close(idp);

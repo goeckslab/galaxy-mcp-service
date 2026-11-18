@@ -194,7 +194,7 @@ const HTML = `<!doctype html>
         </div>
       </div>
       <div class="header-actions">
-        <button id="manage-connections" class="close-button" type="button" hidden>Connections</button>
+        <button id="manage-connections" class="close-button" type="button" hidden>Manage connections</button>
         <span id="badge" class="badge">Waiting</span>
       </div>
     </header>
@@ -565,7 +565,7 @@ const HTML = `<!doctype html>
         managementNote.hidden = false;
       } finally {
         manageConnections.disabled = !toolsAvailable();
-        manageConnections.textContent = "Connections";
+        manageConnections.textContent = "Manage connections";
         sendSize();
       }
     });
