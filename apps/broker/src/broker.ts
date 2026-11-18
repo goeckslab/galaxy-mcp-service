@@ -107,26 +107,30 @@ class ConnectionProblem extends Error {
  * heavy shadows, near-black primary buttons and outlined secondary ones.
  */
 const baseStyle = [
-  ":root{--bg:#fafafa;--card:#fff;--fg:#18181b;--muted:#71717a;--border:#e4e4e7;--strong:#d4d4d8;--danger:#b91c1c;--warn:#a16207;--ok:#166534}",
+  ":root{color-scheme:light dark;--bg:#fafafa;--card:#fff;--fg:#18181b;--on-fg:#fff;--muted:#71717a;--border:#e4e4e7;--strong:#d4d4d8;--selected:#a1a1aa;--hover:#f4f4f5;--shadow:rgb(0 0 0/.04);"
+    + "--danger:#b91c1c;--danger-line:#fecaca;--danger-hover:#fef2f2;--warn:#a16207;--ok:#166534;--ok-line:#bbf7d0;--ok-bg:#f0fdf4}",
+  // Follows the system setting; these pages open outside the AI app, so there is no host theme to read.
+  "@media(prefers-color-scheme:dark){:root{--bg:#09090b;--card:#18181b;--fg:#fafafa;--on-fg:#18181b;--muted:#a1a1aa;--border:#27272a;--strong:#3f3f46;--selected:#71717a;--hover:#27272a;--shadow:rgb(0 0 0/.3);"
+    + "--danger:#f87171;--danger-line:#7f1d1d;--danger-hover:#2a1215;--warn:#fbbf24;--ok:#4ade80;--ok-line:#14532d;--ok-bg:#0b2414}}",
   "*{box-sizing:border-box}body{margin:0;padding:48px 16px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif;-webkit-font-smoothing:antialiased}",
   "h1{margin:0 0 8px;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-.01em}h2{margin:0;font-size:16px;line-height:1.4;font-weight:600}",
   "p{margin:0 0 16px}ol{margin:0 0 16px;padding-left:20px}li{margin:4px 0}.small{font-size:13px;color:var(--muted)}",
   "a{color:inherit;text-decoration:underline;text-decoration-color:var(--strong);text-underline-offset:2px}a:hover{text-decoration-color:currentColor}",
-  ".button,button{display:block;width:100%;height:40px;margin-top:8px;padding:0 16px;border:1px solid var(--fg);border-radius:8px;background:var(--fg);color:#fff;font:inherit;font-weight:500;line-height:38px;text-align:center;text-decoration:none;cursor:pointer}",
+  ".button,button{display:block;width:100%;height:40px;margin-top:8px;padding:0 16px;border:1px solid var(--fg);border-radius:8px;background:var(--fg);color:var(--on-fg);font:inherit;font-weight:500;line-height:38px;text-align:center;text-decoration:none;cursor:pointer}",
   ".button.secondary,button.secondary,button[value=cancel]{background:var(--card);color:var(--fg);border-color:var(--strong)}",
-  ".button.secondary:hover,button.secondary:hover,button[value=cancel]:hover{background:#f4f4f5}:focus-visible{outline:2px solid var(--fg);outline-offset:2px}",
+  ".button.secondary:hover,button.secondary:hover,button[value=cancel]:hover{background:var(--hover)}:focus-visible{outline:2px solid var(--fg);outline-offset:2px}",
 ].join("");
 
 /** A single centred card, for forms and short notices. */
 const cardStyle = baseStyle
-  + "main{max-width:480px;margin:0 auto;padding:32px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 2px rgb(0 0 0/.04);overflow-wrap:anywhere}"
+  + "main{max-width:480px;margin:0 auto;padding:32px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 2px var(--shadow);overflow-wrap:anywhere}"
   + "@media(max-width:520px){body{padding:16px 12px}main{padding:24px 16px}}";
 
 const formStyle = [
   "label{display:block}input[type=checkbox],input[type=radio]{margin:0;width:16px;height:16px;flex:none;accent-color:var(--fg)}",
   ".sites{display:grid;gap:8px;margin:16px 0}",
   // Long host names and status labels wrap instead of widening the card.
-  ".site{min-width:0;padding:12px 16px;border:1px solid var(--border);border-radius:8px;overflow-wrap:anywhere}.site:has(.pick input:checked),.site.fixed{border-color:#a1a1aa}",
+  ".site{min-width:0;padding:12px 16px;border:1px solid var(--border);border-radius:8px;overflow-wrap:anywhere}.site:has(.pick input:checked),.site.fixed{border-color:var(--selected)}",
   ".pick{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;cursor:pointer}.name{font-weight:500}.host{margin-left:auto;font-size:13px;color:var(--muted);text-align:right}",
   ".details{display:grid;gap:8px;margin:12px 0 0 28px}.option{display:flex;align-items:flex-start;gap:8px;cursor:pointer}.option>span{min-width:0}.option input{margin-top:4px}",
   ".key input{width:100%;height:36px;padding:0 12px;border:1px solid var(--strong);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}.key input:focus{outline:2px solid var(--fg);outline-offset:1px}",
@@ -494,12 +498,12 @@ export async function createBroker(config: BrokerConfig) {
     type Target = Managed & { targetGrant: string };
     const manageStyle = baseStyle + [
       "main{max-width:640px;margin:0 auto}header{margin-bottom:24px}header .eyebrow{margin:0 0 4px;font-size:13px;color:var(--muted)}header p{color:var(--muted)}",
-      "section,.empty{padding:24px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 2px rgb(0 0 0/.04)}section>p{margin:4px 0 16px;font-size:14px;color:var(--muted)}",
-      ".notice{margin-bottom:16px;padding:12px 16px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;color:var(--ok);font-size:14px}",
+      "section,.empty{padding:24px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 2px var(--shadow)}section>p{margin:4px 0 16px;font-size:14px;color:var(--muted)}",
+      ".notice{margin-bottom:16px;padding:12px 16px;border:1px solid var(--ok-line);border-radius:8px;background:var(--ok-bg);color:var(--ok);font-size:14px}",
       "ul{list-style:none;margin:0 0 16px;padding:0;border-top:1px solid var(--border)}li{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0;padding:12px 0;border-bottom:1px solid var(--border)}",
       "li>div:first-child{min-width:0;overflow-wrap:anywhere}li strong{font-weight:500}.status{margin-left:8px;font-size:13px;color:var(--muted)}.status.warn{color:var(--warn)}li a{font-size:13px;color:var(--muted)}",
       ".actions{display:flex;flex:none;gap:8px}.actions button,.add button{display:inline-block;width:auto;height:32px;margin:0;padding:0 12px;font-size:14px;line-height:30px}",
-      ".leave{margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}button.danger{display:inline-block;width:auto;margin:0;background:var(--card);color:var(--danger);border-color:#fecaca}button.danger:hover{background:#fef2f2}",
+      ".leave{margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}button.danger{display:inline-block;width:auto;margin:0;background:var(--card);color:var(--danger);border-color:var(--danger-line)}button.danger:hover{background:var(--danger-hover)}",
       "footer{margin-top:16px;font-size:13px;color:var(--muted)}@media(max-width:600px){body{padding:24px 12px}section{padding:16px}li{flex-direction:column;align-items:flex-start;gap:8px}}",
     ].join("");
     const actionButton = (token: string, text: string, className = "") =>
