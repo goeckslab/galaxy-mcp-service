@@ -102,23 +102,38 @@ class ConnectionProblem extends Error {
   }
 }
 
-const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001;overflow-wrap:anywhere}@media(max-width:520px){body{padding:12px}main{padding:22px;margin:2vh auto}}h1{margin-top:0;font-size:26px}p,small,li{line-height:1.5}ol{padding-left:22px}li{margin:6px 0}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}button.button{display:block;width:100%;box-sizing:border-box;font:inherit;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;margin-top:20px;cursor:pointer}button.button.secondary{background:#eee;color:#222;margin-top:12px}";
+/**
+ * Shared look of every broker page: neutral colours, one 4/8px spacing scale, thin borders instead of
+ * heavy shadows, near-black primary buttons and outlined secondary ones.
+ */
+const baseStyle = [
+  ":root{--bg:#fafafa;--card:#fff;--fg:#18181b;--muted:#71717a;--border:#e4e4e7;--strong:#d4d4d8;--danger:#b91c1c;--warn:#a16207;--ok:#166534}",
+  "*{box-sizing:border-box}body{margin:0;padding:48px 16px;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif;-webkit-font-smoothing:antialiased}",
+  "h1{margin:0 0 8px;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-.01em}h2{margin:0;font-size:16px;line-height:1.4;font-weight:600}",
+  "p{margin:0 0 16px}ol{margin:0 0 16px;padding-left:20px}li{margin:4px 0}.small{font-size:13px;color:var(--muted)}",
+  "a{color:inherit;text-decoration:underline;text-decoration-color:var(--strong);text-underline-offset:2px}a:hover{text-decoration-color:currentColor}",
+  ".button,button{display:block;width:100%;height:40px;margin-top:8px;padding:0 16px;border:1px solid var(--fg);border-radius:8px;background:var(--fg);color:#fff;font:inherit;font-weight:500;line-height:38px;text-align:center;text-decoration:none;cursor:pointer}",
+  ".button.secondary,button.secondary,button[value=cancel]{background:var(--card);color:var(--fg);border-color:var(--strong)}",
+  ".button.secondary:hover,button.secondary:hover,button[value=cancel]:hover{background:#f4f4f5}:focus-visible{outline:2px solid var(--fg);outline-offset:2px}",
+].join("");
+
+/** A single centred card, for forms and short notices. */
+const cardStyle = baseStyle
+  + "main{max-width:480px;margin:0 auto;padding:32px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 2px rgb(0 0 0/.04);overflow-wrap:anywhere}"
+  + "@media(max-width:520px){body{padding:16px 12px}main{padding:24px 16px}}";
 
 const formStyle = [
-  "label{display:block}button{box-sizing:border-box;font:inherit;width:100%;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;margin-top:12px;cursor:pointer}",
-  "button[value=cancel],button.secondary{background:#eee;color:#222}input[type=checkbox],input[type=radio]{margin:0;width:18px;height:18px;flex:none;accent-color:#0068da}",
-  ".sites{display:grid;gap:10px;margin:16px 0 20px}.site{border:1px solid #d2d2d7;border-radius:14px;padding:14px 16px}",
-  ".site:has(.pick input:checked),.site.fixed{border-color:#0068da;background:#f5f9ff}",
+  "label{display:block}input[type=checkbox],input[type=radio]{margin:0;width:16px;height:16px;flex:none;accent-color:var(--fg)}",
+  ".sites{display:grid;gap:8px;margin:16px 0}",
   // Long host names and status labels wrap instead of widening the card.
-  ".site{min-width:0;overflow-wrap:anywhere}.pick{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;cursor:pointer}.name{font-weight:600}.host{color:#6e6e73;font-size:14px;margin-left:auto;text-align:right}",
-  ".details{display:grid;gap:10px;margin:12px 0 0 30px}.option{display:flex;align-items:flex-start;gap:10px;cursor:pointer}.option>span{min-width:0;line-height:1.4}.option input{margin-top:1px}",
-  ".badge{font-size:12px;background:#e3f0ff;color:#0058b9;border-radius:999px;padding:2px 8px;white-space:nowrap}",
-  ".key input{box-sizing:border-box;width:100%;font:inherit;padding:10px 12px;border:1px solid #b8b8bd;border-radius:10px;background:white}",
-  ".help{display:inline-block;font-size:14px;margin-top:6px}.hint{font-size:14px;color:#555;margin:0}",
-  ".status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px}",
-  "label.consent{display:flex;gap:10px;align-items:flex-start;margin-top:4px}label.consent input{margin-top:3px}",
-  "details.more{margin-top:24px;color:#555;font-size:15px}details.more summary{cursor:pointer;color:#0068da}details.more p{margin:10px 0}.small{font-size:14px;color:#6e6e73}",
-  "@media(max-width:520px){.host{width:100%;margin-left:30px;text-align:left}.fixed .host{margin-left:0}.details{margin-left:0}}",
+  ".site{min-width:0;padding:12px 16px;border:1px solid var(--border);border-radius:8px;overflow-wrap:anywhere}.site:has(.pick input:checked),.site.fixed{border-color:#a1a1aa}",
+  ".pick{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;cursor:pointer}.name{font-weight:500}.host{margin-left:auto;font-size:13px;color:var(--muted);text-align:right}",
+  ".details{display:grid;gap:8px;margin:12px 0 0 28px}.option{display:flex;align-items:flex-start;gap:8px;cursor:pointer}.option>span{min-width:0}.option input{margin-top:4px}",
+  ".key input{width:100%;height:36px;padding:0 12px;border:1px solid var(--strong);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}.key input:focus{outline:2px solid var(--fg);outline-offset:1px}",
+  ".help{display:inline-block;margin-top:4px;font-size:13px;color:var(--muted)}.hint{margin:0;font-size:13px;color:var(--muted)}.status{font-size:13px;color:var(--muted)}",
+  "label.consent{display:flex;gap:8px;align-items:flex-start;margin:16px 0 8px}label.consent input{margin-top:4px}",
+  "details.more{margin-top:24px;font-size:13px;color:var(--muted)}details.more summary{cursor:pointer;color:var(--fg)}details.more p{margin:8px 0 0}",
+  "@media(max-width:520px){.host{width:100%;margin-left:28px;text-align:left}.fixed .host{margin-left:0}.details{margin-left:0}}",
   // Without :has() every site stays open, which still works.
   "@supports selector(:has(*)){.site:not(.fixed):not(:has(.pick input:checked)) .details{display:none}",
   ".site:has(input[value=login]:checked) .key{display:none}.site:has(input[value=key]:checked) .first{display:none}}",
@@ -216,7 +231,7 @@ export async function createBroker(config: BrokerConfig) {
     const key = `<div class="key"><input id="key-${escape(name)}" name="api_key.${escape(name)}" type="password" autocomplete="off" maxlength="4096" placeholder="Paste your ${host} API key" aria-label="API key for ${label}">
       <a class="help" href="${escape(url)}/user/api_key" target="_blank" rel="noopener noreferrer">Find your API key on ${host}</a></div>`;
     const choice = logins.has(name)
-      ? `<label class="option"><input type="radio" name="method.${escape(name)}" value="login" checked><span>Sign in with your ${host} account <span class="badge">Recommended</span></span></label>
+      ? `<label class="option"><input type="radio" name="method.${escape(name)}" value="login" checked><span>Sign in with your ${host} account</span></label>
         <p class="hint first">Never used Keycloak on ${host}? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in there with Keycloak</a> once first, then come back here.</p>
         <label class="option"><input type="radio" name="method.${escape(name)}" value="key"><span>Use an API key instead</span></label>${key}`
       : key;
@@ -477,7 +492,16 @@ export async function createBroker(config: BrokerConfig) {
     };
     type Managed = { accountId: string; sourceGrant: string };
     type Target = Managed & { targetGrant: string };
-    const manageStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}li>div:first-child{min-width:0;overflow-wrap:anywhere}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer;background:#0068da;color:white}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}.actions{display:flex;gap:8px;flex:none}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}.status.warn{background:#fdecc8;color:#7a4a00}.add{margin:4px 0 20px}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}";
+    const manageStyle = baseStyle + [
+      "main{max-width:640px;margin:0 auto}header{margin-bottom:24px}header .eyebrow{margin:0 0 4px;font-size:13px;color:var(--muted)}header p{color:var(--muted)}",
+      "section,.empty{padding:24px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 2px rgb(0 0 0/.04)}section>p{margin:4px 0 16px;font-size:14px;color:var(--muted)}",
+      ".notice{margin-bottom:16px;padding:12px 16px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;color:var(--ok);font-size:14px}",
+      "ul{list-style:none;margin:0 0 16px;padding:0;border-top:1px solid var(--border)}li{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0;padding:12px 0;border-bottom:1px solid var(--border)}",
+      "li>div:first-child{min-width:0;overflow-wrap:anywhere}li strong{font-weight:500}.status{margin-left:8px;font-size:13px;color:var(--muted)}.status.warn{color:var(--warn)}li a{font-size:13px;color:var(--muted)}",
+      ".actions{display:flex;flex:none;gap:8px}.actions button,.add button{display:inline-block;width:auto;height:32px;margin:0;padding:0 12px;font-size:14px;line-height:30px}",
+      ".leave{margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}button.danger{display:inline-block;width:auto;margin:0;background:var(--card);color:var(--danger);border-color:#fecaca}button.danger:hover{background:#fef2f2}",
+      "footer{margin-top:16px;font-size:13px;color:var(--muted)}@media(max-width:600px){body{padding:24px 12px}section{padding:16px}li{flex-direction:column;align-items:flex-start;gap:8px}}",
+    ].join("");
     const actionButton = (token: string, text: string, className = "") =>
       `<form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button${className ? ` class="${className}"` : ""}>${escape(text)}</button></form>`;
     const clientLabelFor = (clientId: string) =>
@@ -495,20 +519,20 @@ export async function createBroker(config: BrokerConfig) {
           const change = await actionToken({ ...target, operation: "edit", instance });
           const remove = await actionToken({ ...target, operation: "remove", instance });
           return `<li><div><strong>${escape(siteName(instance))}</strong><span class="status${expired ? " warn" : ""}">${escape(methodLabel(connection))}</span><br><a href="${escape(baseUrl)}" target="_blank" rel="noopener noreferrer">${escape(baseUrl)}</a></div>
-            <div class="actions">${actionButton(change, expired ? "Sign in again" : "Change")}${actionButton(remove, "Remove site", "secondary")}</div></li>`;
+            <div class="actions">${actionButton(change, expired ? "Sign in again" : "Change", expired ? "" : "secondary")}${actionButton(remove, "Remove site", "secondary")}</div></li>`;
         }));
         const addable = [...instances.keys()].some(name => !credential.connections.some(value => value.instance === name))
           && credential.connections.length < MAX_CONNECTIONS;
         const add = addable ? actionButton(await actionToken({ ...target, operation: "edit" }), "Add a Galaxy site") : "";
         const revoke = await actionToken({ ...target, operation: "revoke" });
         card = `<section><h2>${escape(clientLabelFor(credential.clientId))}</h2><p>Can browse Galaxy data and run analyses. Expires on ${escape(new Date(credential.expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }))}.</p><ul>${sites.join("")}</ul>
-          <div class="add">${add}</div>${actionButton(revoke, "Disconnect this client", "danger")}</section>`;
+          <div class="add">${add}</div><div class="leave">${actionButton(revoke, "Disconnect this client", "danger")}</div></section>`;
       }
       ctx.set("Referrer-Policy", "same-origin");
       ctx.type = "html";
       ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Manage Galaxy connections</title>
         <style>${manageStyle}</style>
-        <main><header><p>Galaxy MCP</p><h1>Manage connections</h1><p>This page was opened from an active plugin authorization. It does not use a browser login cookie, and API keys are never displayed.</p></header>
+        <main><header><p class="eyebrow">Galaxy MCP</p><h1>Manage connections</h1><p>This page was opened from an active plugin authorization. It does not use a browser login cookie, and API keys are never displayed.</p></header>
         ${notice ? `<div class="notice" role="status">${escape(notice)}</div>` : ""}
         ${card || '<div class="empty"><h2>No active connection</h2><p>This plugin authorization is no longer active. Reconnect Galaxy from your AI client when you want to use it again.</p></div>'}
         <footer><p>Each button is valid once for ten minutes. Use Change to switch a site to another account or a new API key; after creating a new key in Galaxy, delete the old one there. Removing a site or disconnecting does not delete anything in Galaxy.</p></footer></main></html>`;
@@ -563,7 +587,7 @@ export async function createBroker(config: BrokerConfig) {
     if (ctx.path === "/connections" && ctx.method === "GET") {
       ctx.set("Content-Security-Policy", managementCsp);
       ctx.type = "html";
-      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Manage Galaxy connections</title><style>body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:640px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}p{line-height:1.5}a{color:#06c}</style><main><h1>Manage Galaxy connections</h1><p>Ask your connected AI assistant to “manage my Galaxy connections.” It will create a private five-minute link using the plugin's current authorization. Browser cookies are not used.</p><p><a href="${escape(new URL("/support", resource).href)}">Get help</a></p></main></html>`;
+      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Manage Galaxy connections</title><style>${cardStyle}</style><main><h1>Manage Galaxy connections</h1><p>Ask your connected AI assistant to “manage my Galaxy connections.” It will create a private five-minute link using the plugin's current authorization. Browser cookies are not used.</p><p><a href="${escape(new URL("/support", resource).href)}">Get help</a></p></main></html>`;
       return;
     }
     const ticketMatch = /^\/connections\/([A-Za-z0-9_-]{43})$/.exec(ctx.path);

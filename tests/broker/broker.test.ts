@@ -664,7 +664,7 @@ describe("durable Galaxy credential broker", () => {
     expect((await (await introspect(other.access_token)).json()).galaxy_connections).toHaveLength(1);
 
     // Changing one site offers only that site and needs consent again.
-    const changing = await managementPost("action", { action_token: /<strong>us<\/strong>[\s\S]*?name="action_token" value="([^"]+)"><button>Change/.exec(addedPage)![1]! });
+    const changing = await managementPost("action", { action_token: /<strong>us<\/strong>[\s\S]*?name="action_token" value="([^"]+)"><button class="secondary">Change/.exec(addedPage)![1]! });
     const changeForm = await changing.text();
     expect(changeForm).toContain("<h1>Change us</h1>");
     expect(changeForm).toContain('<span class="status">Now: API key</span>');
