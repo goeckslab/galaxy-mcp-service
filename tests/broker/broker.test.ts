@@ -171,6 +171,28 @@ async function managementLink(token: string) {
   });
 }
 
+/** Opens the management page for an access token's grant and returns its HTML. */
+async function managementPage(token: string, browser = new Browser()) {
+  const link = await (await managementLink(token)).json() as { url: string };
+  const ticket = /name="ticket" value="([^"]+)"/.exec(await (await browser.request(link.url)).text())![1]!;
+  const page = await browser.request(`${config.issuer}/connections/start`, {
+    method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }),
+  });
+  expect(page.status).toBe(200);
+  return page.text();
+}
+
+/** The one-time token of the form whose button reads `text`. */
+function buttonToken(html: string, text: string) {
+  return new RegExp(`name="action_token" value="([^"]+)"><button[^>]*>${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</button>`).exec(html)?.[1];
+}
+
+async function managementPost(path: "action" | "save", fields: Record<string, string>, browser = new Browser()) {
+  return browser.request(`${config.issuer}/connections/${path}`, {
+    method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields),
+  });
+}
+
 beforeAll(async () => {
   databaseUrl = process.env.BROKER_TEST_DATABASE_URL || "";
   if (!databaseUrl) {
@@ -544,7 +566,7 @@ describe("durable Galaxy credential broker", () => {
       method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ ticket: ticket! }),
     })).status).toBe(400);
-    const remove = /<strong>us<\/strong>[\s\S]*?name="action_token" value="([^"]+)"[\s\S]*?Remove site/.exec(html)?.[1];
+    const remove = /<strong>us<\/strong>[\s\S]*?name="action_token" value="([^"]+)"><button class="secondary">Remove site/.exec(html)?.[1];
     expect(remove).toBeTruthy();
 
     const forged = await browser.request(`${config.issuer}/connections/action`, {
@@ -582,6 +604,62 @@ describe("durable Galaxy credential broker", () => {
     expect(await (await introspect(unrelated.access_token)).json()).toMatchObject({ active: true });
   });
 
+  it("adds a site to an existing grant and switches a site's key from the management page, verifying and confirming each change", async () => {
+    const issued = await tokens("us");
+    const other = await tokens("us", "client-b");
+    const page = await managementPage(issued.access_token);
+    expect(page).toContain('<span class="status">API key</span>');
+    expect(page).not.toContain(config.instances.eu);
+
+    // Adding offers only the sites not yet in this connection.
+    const adding = await managementPost("action", { action_token: buttonToken(page, "Add a Galaxy site")! });
+    expect(adding.status).toBe(200);
+    const addForm = await adding.text();
+    expect(addForm).toContain('name="api_key.eu"');
+    expect(addForm).not.toContain('name="api_key.us"');
+    expect(addForm).toContain("I allow client-a to read my Galaxy data");
+    const save = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(addForm)![1]!;
+
+    // A key Galaxy refuses saves nothing and offers a way back.
+    const refused = await managementPost("save", { action_token: save, consent: "yes", "api_key.eu": "wrong-key" });
+    expect(refused.status).toBe(400);
+    const refusal = await refused.text();
+    expect(refusal).toContain("API key not accepted");
+    expect(refusal).not.toContain("wrong-key");
+    expect(await (await introspect(issued.access_token)).json()).toMatchObject({ galaxy_connections: [{ instance: "us" }] });
+    // The save token was used; the page's own back button opens a fresh form for the same change.
+    expect((await managementPost("save", { action_token: save, consent: "yes", "api_key.eu": keys.eu })).status).toBe(400);
+    const retry = await (await managementPost("action", { action_token: buttonToken(refusal, "Back to Manage connections")! })).text();
+    const retrySave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(retry)![1]!;
+    // A site the form did not offer cannot be slipped in.
+    expect((await managementPost("save", { action_token: retrySave, consent: "yes", "api_key.us": keys.us })).status).toBe(400);
+
+    const again = await managementPost("action", { action_token: buttonToken(await managementPage(issued.access_token), "Add a Galaxy site")! });
+    const addSave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(await again.text())![1]!;
+    const added = await managementPost("save", { action_token: addSave, consent: "yes", "api_key.eu": keys.eu });
+    expect(added.status).toBe(200);
+    const addedPage = await added.text();
+    expect(addedPage).toContain("eu updated.");
+    expect(addedPage).not.toContain("Add a Galaxy site");
+    expect(await (await introspect(issued.access_token)).json()).toMatchObject({ active: true, galaxy_connections: [
+      { instance: "eu", api_key: keys.eu }, { instance: "us", api_key: keys.us },
+    ] });
+    // Another client's grant for the same account is untouched.
+    expect(await (await introspect(other.access_token)).json()).toMatchObject({ galaxy_connections: [{ instance: "us" }] });
+    expect((await (await introspect(other.access_token)).json()).galaxy_connections).toHaveLength(1);
+
+    // Changing one site offers only that site and needs consent again.
+    const changing = await managementPost("action", { action_token: /<strong>us<\/strong>[\s\S]*?name="action_token" value="([^"]+)"><button>Change/.exec(addedPage)![1]! });
+    const changeForm = await changing.text();
+    expect(changeForm).toContain("<h1>Change us</h1>");
+    expect(changeForm).toContain('<span class="status">Now: API key</span>');
+    expect(changeForm).not.toContain('name="api_key.eu"');
+    const changeSave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(changeForm)![1]!;
+    const unconfirmed = await managementPost("save", { action_token: changeSave, "api_key.us": keys.us });
+    expect(unconfirmed.status).toBe(400);
+    expect(await unconfirmed.text()).toContain("Nothing was changed");
+  });
+
   it("rejects empty, obsolete, duplicate, unapproved and partially invalid connection sets without saving any keys", async () => {
     for (const fields of [
       {}, { "api_key.us": "", "api_key.eu": "" },
@@ -598,7 +676,7 @@ describe("durable Galaxy credential broker", () => {
       expect(auth.html).toContain("Request a site on GitHub");
       expect(auth.html).toContain("Never post API keys, passwords or private data.");
       expect(auth.html).toContain("every server for which I entered a key");
-      expect(auth.html).toContain("ask your connected assistant naturally to remove a site, rotate a key or disconnect Galaxy");
+      expect(auth.html).toContain("to add or remove a site, switch accounts, replace a key or disconnect");
       const response = await auth.browser.request(auth.location, { method: "POST",
         headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields }),
@@ -1012,6 +1090,30 @@ describe("durable Galaxy credential broker", () => {
       const bothText = await bothRefused.text();
       expect(bothText).toContain("Choose one way to connect");
       expect(bothText).toContain(`<a class="button" href="/interaction/`);
+
+      // A key-only connection can add the site by signing in from the management page, with no browser cookie.
+      const plain = await tokens("us");
+      const managing = new Browser();
+      const addForm = await (await managementPost("action", { action_token: buttonToken(await managementPage(plain.access_token, managing), "Add a Galaxy site")! }, managing)).text();
+      expect(addForm).toContain('name="login.test"');
+      expect(addForm).toContain("First time?");
+      const addSave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(addForm)![1]!;
+      const leaving = await managementPost("save", { action_token: addSave, consent: "yes", "login.test": "yes" }, managing);
+      expect(leaving.status).toBe(200);
+      const providerUrl = /http-equiv="refresh" content="0;url=([^"]+)"/.exec(await leaving.text())![1]!.replaceAll("&amp;", "&");
+      expect(providerUrl.startsWith(`${realm()}/auth?`)).toBe(true);
+      const returning = (await fetch(providerUrl, { redirect: "manual" })).headers.get("location")!;
+      const finished = await managing.request(returning);
+      expect(finished.status).toBe(200);
+      const finishedPage = await finished.text();
+      expect(finishedPage).toContain("test updated.");
+      expect(finishedPage).toContain('<span class="status">Signed in with Keycloak</span>');
+      expect(managing.cookies.size).toBe(0);
+      const added = await (await introspect(plain.access_token)).json() as { galaxy_connections: Array<{ instance: string; access_token?: string; api_key?: string }> };
+      expect(added.galaxy_connections.map(value => value.instance)).toEqual(["test", "us"]);
+      expect(added.galaxy_connections[0]!.access_token).toMatch(/^fixture-access-/);
+      // The provider's response is single-use here too.
+      expect((await managing.request(returning)).status).toBe(400);
     } finally {
       vi.useRealTimers();
       await close(idp);

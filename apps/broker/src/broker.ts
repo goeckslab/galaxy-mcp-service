@@ -6,7 +6,7 @@ import { subscribeParams, unsubscribeParams, eventState } from "@galaxy-mcp-serv
 import { z } from "zod";
 
 import { createGalaxyLogins, type GalaxyLoginConfig, type LoginTokens } from "./galaxy-login.js";
-import { createStore, usableConnections, type Connection } from "./store.js";
+import { createStore, MAX_CONNECTIONS, usableConnections, type Connection } from "./store.js";
 
 export interface BrokerConfig {
   issuer: string;
@@ -102,20 +102,24 @@ class ConnectionProblem extends Error {
   }
 }
 
-const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}h1{margin-top:0;font-size:26px}p,small,li{line-height:1.5}ol{padding-left:22px}li{margin:6px 0}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}";
+const cardStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:480px;margin:8vh auto;background:white;border-radius:24px;padding:32px;box-shadow:0 12px 48px #0001}h1{margin-top:0;font-size:26px}p,small,li{line-height:1.5}ol{padding-left:22px}li{margin:6px 0}a.button{display:block;box-sizing:border-box;text-align:center;text-decoration:none;font:inherit;padding:12px;border-radius:10px;background:#0068da;color:white;margin-top:20px}a.button.secondary{background:#eee;color:#222;margin-top:12px}button.button{display:block;width:100%;box-sizing:border-box;font:inherit;padding:12px;border:0;border-radius:10px;background:#0068da;color:white;margin-top:20px;cursor:pointer}button.button.secondary{background:#eee;color:#222;margin-top:12px}";
+
+const formStyle = "label{display:block;margin:20px 0 8px}label.choice{margin:0;display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #b8b8bd;border-radius:10px;cursor:pointer}label.choice:has(input:checked){border-color:#0068da;background:#f0f6ff}input[type=password],select,button{box-sizing:border-box;font:inherit;width:100%;padding:12px;border:1px solid #b8b8bd;border-radius:10px}button{background:#0068da;color:white;border:0;margin-top:20px;cursor:pointer}button[value=cancel],button.secondary{background:#eee;color:#222}input[type=checkbox]{margin:0;width:18px;height:18px;flex:none}fieldset.site{border:0;padding:0;margin:20px 0 0}fieldset.site legend{padding:0;margin-bottom:8px}details{margin-top:8px}summary{cursor:pointer;color:#0068da;font-size:15px;padding:4px 0;list-style-position:inside}details input{margin-top:8px}.hint{font-size:15px;color:#555;margin:8px 0 0}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:4px;white-space:nowrap}label.consent{display:flex;gap:10px;align-items:flex-start}label.consent input{margin-top:3px}";
 
 /**
  * A short card explaining why connecting stopped and what to do next.
- * `back` reopens the connection form, which stays valid for the interaction's ten minutes.
+ * `back` reopens the connection form, which stays valid for the interaction's ten minutes,
+ * or, as a one-time management token, the connection-management page.
  */
-function problemPage(problem: unknown, fallback: string, back?: string) {
+function problemPage(problem: unknown, fallback: string, back?: string | { token: string }) {
   const { title, message, action, steps } = problem instanceof ConnectionProblem ? problem
     : { title: "Galaxy is not connected yet", message: fallback, action: undefined, steps: [] };
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title><style>${cardStyle}</style>`
     + `<main><h1>${escape(title)}</h1><p>${escape(message)}</p>`
     + (steps.length ? `<ol>${steps.map(step => `<li>${escape(step)}</li>`).join("")}</ol>` : "")
     + (action ? `<a class="button" href="${escape(action.href)}" target="_blank" rel="noopener noreferrer">${escape(action.text)}</a>` : "")
-    + (back ? `<a class="button${action ? " secondary" : ""}" href="${escape(back)}">Back to Connect Galaxy</a>` : "")
+    + (typeof back === "string" ? `<a class="button${action ? " secondary" : ""}" href="${escape(back)}">Back to Connect Galaxy</a>`
+      : back ? `<form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${escape(back.token)}"><button class="button${action ? " secondary" : ""}">Back to Manage connections</button></form>` : "")
     + "</main></html>";
 }
 
@@ -175,6 +179,38 @@ export async function createBroker(config: BrokerConfig) {
   // A connection in progress while the person signs in to one or more Galaxy sites.
   const signInStore = new store.adapter("GalaxySignIn");
   const managementTicketStore = new store.adapter("ManagementTicket");
+  /** Form fields for the given sites: an API key, or for a site with sign-in, the Keycloak choice with the key one click away. */
+  const siteFields = (names: string[], status = new Map<string, string>()) => names.map(name => {
+    const url = instances.get(name)!;
+    const label = url === "https://usegalaxy.org" ? "US" : name;
+    const heading = `${escape(label)} — ${escape(url)}${status.has(name) ? ` <span class="status">${escape(status.get(name)!)}</span>` : ""}`;
+    const key = (labelled: boolean) => `<input id="key-${escape(name)}" name="api_key.${escape(name)}" type="password" autocomplete="off" maxlength="4096" aria-label="API key for ${escape(label)}"${labelled ? "" : ` placeholder="API key"`}>`;
+    if (!logins.has(name)) return `<label for="key-${escape(name)}">${heading}</label>${key(true)}`;
+    const host = escape(new URL(url).host);
+    // Signing in is this site's usual way to connect; an API key stays one click away.
+    return `<fieldset class="site"><legend>${heading}</legend>
+      <label class="choice"><input type="checkbox" name="login.${escape(name)}" value="yes">Sign in with my ${host} account (Keycloak)</label>
+      <p class="hint">First time? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in to ${host} with Keycloak</a> once, then come back here.</p>
+      <details><summary>Use an API key instead</summary>${key(false)}</details></fieldset>`;
+  }).join("");
+  /** The API keys and sign-ins chosen on a site form, limited to the sites it offered. */
+  const readChoices = (form: URLSearchParams, offered: ReadonlySet<string>) => {
+    const selected = [...form].filter(([name, key]) => name.startsWith("api_key.") && key).map(([name, key]) => [name.slice(8), key] as const);
+    const signIns = [...form].filter(([name]) => name.startsWith("login.")).map(([name, value]) => {
+      const instance = name.slice(6);
+      if (value !== "yes" || !logins.has(instance) || !offered.has(instance)) throw new errors.InvalidRequest("Invalid connection.");
+      if (selected.some(([chosen]) => chosen === instance)) {
+        throw new ConnectionProblem(`You chose to sign in to ${new URL(instances.get(instance)!).host} and also entered an API key for it. Go back and keep only one of them.`, "Choose one way to connect");
+      }
+      return instance;
+    }).sort();
+    const apiKeys = selected.map(([instance, apiKey]) => {
+      const baseUrl = instances.get(instance);
+      if (!baseUrl || !offered.has(instance) || apiKey.length > 4096 || /[\r\n]/.test(apiKey)) throw new errors.InvalidRequest("Invalid connection.");
+      return { instance, apiKey, baseUrl };
+    });
+    return { apiKeys, signIns };
+  };
   const managementActionStore = new store.adapter("ManagementAction");
   const clientNames = new Map(clients.map(client => [client.client_id, client.client_name || client.client_id]));
   const policy = interactionPolicy.base();
@@ -333,40 +369,141 @@ export async function createBroker(config: BrokerConfig) {
       } catch { ctx.status = 400; ctx.body = { error: "Run subscription request could not be completed." }; }
       return;
     }
+    const interactionCsp = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+    type SignIn = {
+      /** The consent interaction being completed, or empty when changing an existing connection from the management page. */
+      uid: string;
+      manage?: { accountId: string; sourceGrant: string; targetGrant: string };
+      apiKeys: { instance: string; apiKey: string; baseUrl: string }[];
+      signedIn: { instance: string; baseUrl: string; login: LoginTokens }[];
+      users: Record<string, string>;
+      remaining: string[];
+      step: "authorize" | "returned";
+      verifier?: string;
+    };
+    const continuePage = (target: string, text: string) => {
+      ctx.type = "html";
+      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escape(target)}"><title>${escape(text)}</title><p><a href="${escape(target)}">${escape(text)}</a></p></html>`;
+    };
+    /** Galaxy's own account id for a key or a sign-in's access token. */
+    const galaxyUser = async (baseUrl: string, headers: Record<string, string>) => {
+      const response = await fetch(`${baseUrl}/api/users/current`, {
+        headers: { ...headers, accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok && headers.authorization) {
+        // Galaxy accepts a sign-in only for an account that has used it on that site before.
+        const message = await response.text().catch(() => "");
+        if (/at least once/i.test(message)) {
+          const host = new URL(baseUrl).host;
+          throw new ConnectionProblem(
+            `Your Keycloak sign-in worked, but ${host} has not seen this account yet. Galaxy accepts the sign-in only after you have used it on ${host} once.`,
+            `Log in to ${host} once`, { href: `${baseUrl}/login/start`, text: `Open ${host}` }, [
+              `Open ${host} and choose Keycloak on its login page. A new Galaxy account is created if you do not have one.`,
+              `If you already have a ${host} account with a password, log in with it instead, then link Keycloak under User → Preferences → Manage Third-Party Identities.`,
+              "Come back to this tab and use the Back button below to try again.",
+            ]);
+        }
+        throw new errors.InvalidRequest("Galaxy identity could not be verified.");
+      }
+      if (response.status === 401 || response.status === 403) {
+        await response.body?.cancel();
+        const host = new URL(baseUrl).host;
+        throw new ConnectionProblem(`${host} did not accept this API key. Copy your key again from User → Preferences → Manage API Key on ${host}; keys from another Galaxy site do not work here.`, "API key not accepted");
+      }
+      const user = JSON.parse(await identityBody(response)) as { id?: unknown; deleted?: unknown; is_anonymous?: unknown };
+      if (typeof user.id !== "string" || !user.id || user.deleted || user.is_anonymous) throw new errors.InvalidRequest("Galaxy identity could not be verified.");
+      return user.id;
+    };
+    /** Sends the browser to the next site's login provider, keeping the connection in progress for ten minutes. */
+    const signInNext = async (pending: Omit<SignIn, "step" | "verifier">) => {
+      const state = randomBytes(32).toString("base64url");
+      const verifier = randomBytes(32).toString("base64url");
+      const instance = pending.remaining[0]!;
+      const target = await logins.authorizationUrl(instance, {
+        state, redirectUri: loginCallback, challenge: createHash("sha256").update(verifier).digest("base64url"),
+      });
+      await signInStore.upsert(state, { ...pending, step: "authorize", verifier }, 600);
+      continuePage(target, `Sign in to ${instances.get(instance)}`);
+    };
     const managementCsp = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
     const managementError = () => {
       ctx.status = 400;
-      ctx.type = "text";
-      ctx.body = "This connection-management link is invalid, expired or already used. Request a new link from your AI client.";
+      ctx.type = "html";
+      ctx.body = problemPage(new ConnectionProblem("This connection-management link is invalid, expired or already used. Ask your AI assistant to “manage my Galaxy connections” for a new link.", "This link no longer works"), "");
     };
     const actionToken = async (payload: Record<string, string>) => {
       const token = randomBytes(32).toString("base64url");
       await managementActionStore.upsert(token, payload, 600);
       return token;
     };
-    const renderConnections = async (accountId: string, sourceGrant: string, notice = "") => {
+    type Managed = { accountId: string; sourceGrant: string };
+    type Target = Managed & { targetGrant: string };
+    const manageStyle = "body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer;background:#0068da;color:white}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}.actions{display:flex;gap:8px;flex:none}.status{font-size:13px;color:#555;background:#eee;border-radius:999px;padding:2px 8px;margin-left:6px;white-space:nowrap}.status.warn{background:#fdecc8;color:#7a4a00}.add{margin:4px 0 20px}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}";
+    const actionButton = (token: string, text: string, className = "") =>
+      `<form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button${className ? ` class="${className}"` : ""}>${escape(text)}</button></form>`;
+    const clientLabelFor = (clientId: string) =>
+      // As on the consent page: a Claude metadata URL is shown as its trusted origin.
+      clientNames.get(clientId) || (isClaudeMetadataUrl(clientId) ? "claude.ai" : clientId);
+    const methodLabel = ({ method, expired }: { method: "key" | "login"; expired: boolean }) =>
+      expired ? "Sign-in expired" : method === "login" ? "Signed in with Keycloak" : "API key";
+    const renderConnections = async ({ accountId, sourceGrant }: Managed, notice = "") => {
       const credential = await store.managedCredential(accountId, sourceGrant);
       let card = "";
       if (credential) {
-        const sites = await Promise.all(credential.connections.map(async ({ instance, baseUrl }) => {
-          const token = await actionToken({ accountId, sourceGrant, operation: "remove", targetGrant: credential.grantId, instance });
-          return `<li><div><strong>${escape(instance)}</strong><br><a href="${escape(baseUrl)}" target="_blank" rel="noopener noreferrer">${escape(baseUrl)}</a></div>
-            <form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button class="secondary">Remove site</button></form></li>`;
+        const target = { accountId, sourceGrant, targetGrant: credential.grantId };
+        const sites = await Promise.all(credential.connections.map(async connection => {
+          const { instance, baseUrl, expired } = connection;
+          const change = await actionToken({ ...target, operation: "edit", instance });
+          const remove = await actionToken({ ...target, operation: "remove", instance });
+          return `<li><div><strong>${escape(instance)}</strong><span class="status${expired ? " warn" : ""}">${escape(methodLabel(connection))}</span><br><a href="${escape(baseUrl)}" target="_blank" rel="noopener noreferrer">${escape(baseUrl)}</a></div>
+            <div class="actions">${actionButton(change, expired ? "Sign in again" : "Change")}${actionButton(remove, "Remove site", "secondary")}</div></li>`;
         }));
-        const token = await actionToken({ accountId, sourceGrant, operation: "revoke", targetGrant: credential.grantId });
-        // As on the consent page: a Claude metadata URL is shown as its trusted origin.
-        const clientLabel = clientNames.get(credential.clientId) || (isClaudeMetadataUrl(credential.clientId) ? "claude.ai" : credential.clientId);
-        card = `<section><h2>${escape(clientLabel)}</h2><p>Can browse Galaxy data and run analyses. Expires ${escape(new Date(credential.expiresAt).toISOString())}.</p><ul>${sites.join("")}</ul>
-          <form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${token}"><button class="danger">Disconnect this client</button></form></section>`;
+        const addable = [...instances.keys()].some(name => !credential.connections.some(value => value.instance === name))
+          && credential.connections.length < MAX_CONNECTIONS;
+        const add = addable ? actionButton(await actionToken({ ...target, operation: "edit" }), "Add a Galaxy site") : "";
+        const revoke = await actionToken({ ...target, operation: "revoke" });
+        card = `<section><h2>${escape(clientLabelFor(credential.clientId))}</h2><p>Can browse Galaxy data and run analyses. Expires ${escape(new Date(credential.expiresAt).toISOString())}.</p><ul>${sites.join("")}</ul>
+          <div class="add">${add}</div>${actionButton(revoke, "Disconnect this client", "danger")}</section>`;
       }
       ctx.set("Referrer-Policy", "same-origin");
       ctx.type = "html";
       ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Manage Galaxy connections</title>
-        <style>body{font:16px system-ui;background:#f5f5f7;color:#1d1d1f;margin:0;padding:32px}main{max-width:720px;margin:5vh auto}header,section,.empty,.notice{background:white;border-radius:24px;padding:28px;margin:16px 0;box-shadow:0 12px 48px #0001}.notice{background:#eaf5ed;color:#175c2e}h1,h2{margin-top:0}p{line-height:1.5;color:#555}ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid #eee}a{color:#06c;overflow-wrap:anywhere}button{font:inherit;padding:10px 14px;border:0;border-radius:10px;cursor:pointer}.secondary{background:#eee;color:#222}.danger{background:#b42318;color:white}footer{color:#666;padding:12px 4px}@media(max-width:600px){body{padding:16px}li{align-items:flex-start;flex-direction:column}}</style>
+        <style>${manageStyle}</style>
         <main><header><p>Galaxy MCP</p><h1>Manage connections</h1><p>This page was opened from an active plugin authorization. It does not use a browser login cookie, and API keys are never displayed.</p></header>
         ${notice ? `<div class="notice" role="status">${escape(notice)}</div>` : ""}
         ${card || '<div class="empty"><h2>No active connection</h2><p>This plugin authorization is no longer active. Reconnect Galaxy from your AI client when you want to use it again.</p></div>'}
-        <footer><p>Each button is valid once for ten minutes. To rotate an API key, disconnect the affected connection, rotate the key in Galaxy, then reconnect from your AI client. Rotating the key in Galaxy immediately disables the old key.</p></footer></main></html>`;
+        <footer><p>Each button is valid once for ten minutes. Use Change to switch a site to another account or a new API key; after creating a new key in Galaxy, delete the old one there. Removing a site or disconnecting does not delete anything in Galaxy.</p></footer></main></html>`;
+    };
+    /** The form for adding sites to a connection, or for changing how one of its sites is connected. */
+    const renderEdit = async (target: Target, instance?: string) => {
+      const credential = await store.managedCredential(target.accountId, target.sourceGrant);
+      if (!credential || credential.grantId !== target.targetGrant) throw new errors.InvalidRequest("Connection is no longer available.");
+      const connected = new Map(credential.connections.map(value => [value.instance, value]));
+      const names = instance ? [instance] : [...instances.keys()].filter(name => !connected.has(name));
+      if (!names.length || (instance && (!connected.has(instance) || !instances.has(instance)))) throw new errors.InvalidRequest("Nothing to change.");
+      const status = new Map(names.flatMap(name => connected.has(name) ? [[name, `Now: ${methodLabel(connected.get(name)!)}`] as const] : []));
+      const save = await actionToken({ ...target, operation: "save", sites: names.join(" "), ...(instance ? { instance } : {}) });
+      const back = await actionToken({ ...target, operation: "view" });
+      const client = clientLabelFor(credential.clientId);
+      const title = instance ? `Change ${instance}` : "Add a Galaxy site";
+      const intro = instance
+        ? "Enter a new API key, or sign in, to connect this site with that account instead. Runs being watched on this site stop being watched."
+        : `Enter your own API key, or choose to sign in, for each site you want to add; leave the others blank. A connection holds up to ${MAX_CONNECTIONS} sites; this one has ${credential.connections.length}.`;
+      ctx.set("Referrer-Policy", "same-origin");
+      ctx.type = "html";
+      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title>
+        <style>${cardStyle}${formStyle}</style>
+        <main><h1>${escape(title)}</h1><p>${escape(intro)}</p>
+        <form method="post" action="/connections/save"><input type="hidden" name="action_token" value="${save}">${siteFields(names, status)}
+        <label class="consent"><input type="checkbox" name="consent" value="yes" required>I allow ${escape(client)} to read my Galaxy data and run analyses on the sites I enter a key for or sign in to here.</label>
+        <button>Save</button></form>
+        <form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${back}"><button class="secondary">Back to Manage connections</button></form>
+        <p class="hint">Keys are encrypted and shared only with the Galaxy MCP service, never with the AI client.</p></main></html>`;
+    };
+    /** Saves verified sites into the connection and shows the management page again. */
+    const applyChanges = async (target: Target, connections: Connection[]) => {
+      if (!await store.updateConnections(target.accountId, target.targetGrant, connections)) throw new errors.InvalidRequest("Connection is no longer available.");
+      await renderConnections(target, connections.length === 1 ? `${connections[0]!.instance} updated.` : "Galaxy sites updated.");
     };
     if (ctx.path === "/management/ticket") {
       try {
@@ -413,7 +550,7 @@ export async function createBroker(config: BrokerConfig) {
           const saved = await managementTicketStore.find(ticket) as { accountId?: unknown; sourceGrant?: unknown } | undefined;
           if (typeof saved?.accountId !== "string" || typeof saved.sourceGrant !== "string") throw new errors.InvalidRequest("Invalid management request.");
           await managementTicketStore.consume(ticket);
-          await renderConnections(saved.accountId, saved.sourceGrant);
+          await renderConnections({ accountId: saved.accountId, sourceGrant: saved.sourceGrant });
         } else {
           const form = await readForm(ctx.req, new Set(["action_token"]));
           const token = form.get("action_token") || "";
@@ -422,72 +559,67 @@ export async function createBroker(config: BrokerConfig) {
           } | undefined;
           if (typeof saved?.accountId !== "string" || typeof saved.sourceGrant !== "string" || typeof saved.operation !== "string") throw new errors.InvalidRequest("Invalid management request.");
           await managementActionStore.consume(token);
-          let changed = false;
-          if (typeof saved.targetGrant === "string") {
-            changed = saved.operation === "revoke"
-              ? await store.revokeCredential(saved.accountId, saved.targetGrant)
-              : saved.operation === "remove" && typeof saved.instance === "string"
-                ? await store.removeConnection(saved.accountId, saved.targetGrant, saved.instance)
-                : false;
-          }
+          const managed = { accountId: saved.accountId, sourceGrant: saved.sourceGrant };
+          if (saved.operation === "view") { await renderConnections(managed); return; }
+          if (typeof saved.targetGrant !== "string") throw new errors.InvalidRequest("Connection is no longer available.");
+          const target = { ...managed, targetGrant: saved.targetGrant };
+          const instance = typeof saved.instance === "string" ? saved.instance : undefined;
+          if (saved.operation === "edit") { await renderEdit(target, instance); return; }
+          const changed = saved.operation === "revoke"
+            ? await store.revokeCredential(saved.accountId, saved.targetGrant)
+            : saved.operation === "remove" && instance
+              ? await store.removeConnection(saved.accountId, saved.targetGrant, instance)
+              : false;
           if (!changed) throw new errors.InvalidRequest("Connection is no longer available.");
-          await renderConnections(saved.accountId, saved.sourceGrant, saved.operation === "remove" ? "Galaxy site removed." : "Connection revoked.");
+          await renderConnections(managed, saved.operation === "remove" ? "Galaxy site removed." : "Connection revoked.");
         }
       } catch { managementError(); }
       return;
     }
-    const interactionCsp = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
-    type SignIn = {
-      uid: string;
-      apiKeys: { instance: string; apiKey: string; baseUrl: string }[];
-      signedIn: { instance: string; baseUrl: string; login: LoginTokens }[];
-      users: Record<string, string>;
-      remaining: string[];
-      step: "authorize" | "returned";
-      verifier?: string;
-    };
-    const continuePage = (target: string, text: string) => {
-      ctx.type = "html";
-      ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escape(target)}"><title>${escape(text)}</title><p><a href="${escape(target)}">${escape(text)}</a></p></html>`;
-    };
-    /** Galaxy's own account id for a key or a sign-in's access token. */
-    const galaxyUser = async (baseUrl: string, headers: Record<string, string>) => {
-      const response = await fetch(`${baseUrl}/api/users/current`, {
-        headers: { ...headers, accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(10000),
-      });
-      if (!response.ok && headers.authorization) {
-        // Galaxy accepts a sign-in only for an account that has used it on that site before.
-        const message = await response.text().catch(() => "");
-        if (/at least once/i.test(message)) {
-          const host = new URL(baseUrl).host;
-          throw new ConnectionProblem(
-            `Your Keycloak sign-in worked, but ${host} has not seen this account yet. Galaxy accepts the sign-in only after you have used it on ${host} once.`,
-            `Log in to ${host} once`, { href: `${baseUrl}/login/start`, text: `Open ${host}` }, [
-              `Open ${host} and choose Keycloak on its login page. A new Galaxy account is created if you do not have one.`,
-              `If you already have a ${host} account with a password, log in with it instead, then link Keycloak under User → Preferences → Manage Third-Party Identities.`,
-              "Come back to this tab and select Back to Connect Galaxy.",
-            ]);
+    if (ctx.path === "/connections/save") {
+      ctx.set("Content-Security-Policy", managementCsp);
+      let back: { token: string } | undefined;
+      try {
+        if (ctx.method !== "POST" || ctx.get("origin") !== issuer.origin || !ctx.is("application/x-www-form-urlencoded")
+          || !await store.rateLimit(ctx.ip || "unknown")) throw new errors.InvalidRequest("Invalid management request.");
+        const form = await readForm(ctx.req, new Set(["action_token", "consent", ...[...instances.keys()].flatMap(name => [`api_key.${name}`, `login.${name}`])]));
+        const token = form.get("action_token") || "";
+        const saved = await managementActionStore.find(token) as {
+          accountId?: unknown; sourceGrant?: unknown; operation?: unknown; targetGrant?: unknown; sites?: unknown; instance?: unknown;
+        } | undefined;
+        if (saved?.operation !== "save" || typeof saved.accountId !== "string" || typeof saved.sourceGrant !== "string"
+          || typeof saved.targetGrant !== "string" || typeof saved.sites !== "string") throw new errors.InvalidRequest("Invalid management request.");
+        await managementActionStore.consume(token);
+        const target = { accountId: saved.accountId, sourceGrant: saved.sourceGrant, targetGrant: saved.targetGrant };
+        const instance = typeof saved.instance === "string" ? saved.instance : undefined;
+        back = { token: await actionToken({ ...target, operation: "edit", ...(instance ? { instance } : {}) }) };
+        const { apiKeys, signIns } = readChoices(form, new Set(saved.sites.split(" ")));
+        if (form.get("consent") !== "yes" || !apiKeys.length && !signIns.length) {
+          throw new ConnectionProblem("Enter an API key or choose to sign in for a site, and allow access, before saving.", "Nothing was changed");
         }
-        throw new errors.InvalidRequest("Galaxy identity could not be verified.");
+        const credential = await store.managedCredential(target.accountId, target.sourceGrant);
+        if (!credential || credential.grantId !== target.targetGrant) throw new errors.InvalidRequest("Connection is no longer available.");
+        const added = [...apiKeys.map(value => value.instance), ...signIns].filter(name => !credential.connections.some(value => value.instance === name));
+        if (credential.connections.length + added.length > MAX_CONNECTIONS) {
+          throw new ConnectionProblem(`A connection holds up to ${MAX_CONNECTIONS} sites. Remove a site first, or add fewer.`, "Too many sites");
+        }
+        // Verify every key before signing in or saving anything.
+        const users = Object.fromEntries(await Promise.all(apiKeys.map(async ({ instance: name, baseUrl, apiKey }) =>
+          [name, await galaxyUser(baseUrl, { "x-api-key": apiKey })])));
+        if (signIns.length) await signInNext({ uid: "", manage: target, apiKeys, signedIn: [], users, remaining: signIns });
+        else await applyChanges(target, apiKeys);
+      } catch (error) {
+        if (!back) { managementError(); return; }
+        ctx.status = 400;
+        ctx.type = "html";
+        ctx.body = problemPage(error, "The change was not saved. Go back to try again.", back);
       }
-      const user = JSON.parse(await identityBody(response)) as { id?: unknown; deleted?: unknown; is_anonymous?: unknown };
-      if (typeof user.id !== "string" || !user.id || user.deleted || user.is_anonymous) throw new errors.InvalidRequest("Galaxy identity could not be verified.");
-      return user.id;
-    };
-    /** Sends the browser to the next site's login provider, keeping the connection in progress for ten minutes. */
-    const signInNext = async (pending: Omit<SignIn, "step" | "verifier">) => {
-      const state = randomBytes(32).toString("base64url");
-      const verifier = randomBytes(32).toString("base64url");
-      const instance = pending.remaining[0]!;
-      const target = await logins.authorizationUrl(instance, {
-        state, redirectUri: loginCallback, challenge: createHash("sha256").update(verifier).digest("base64url"),
-      });
-      await signInStore.upsert(state, { ...pending, step: "authorize", verifier }, 600);
-      continuePage(target, `Sign in to ${instances.get(instance)}`);
-    };
+      return;
+    }
     if (ctx.path === "/interaction/keycloak/callback") {
       ctx.set("Content-Security-Policy", interactionCsp);
       let back: string | undefined;
+      let manage: Target | undefined;
       try {
         if (ctx.method !== "GET") { ctx.status = 405; return; }
         if (!await store.rateLimit(ctx.ip || "unknown")) { ctx.status = 429; ctx.body = "Too many attempts. Try again later."; return; }
@@ -497,7 +629,8 @@ export async function createBroker(config: BrokerConfig) {
         if (!pending || pending.consumed || pending.step !== "authorize" || !pending.verifier) throw new errors.InvalidRequest("Invalid sign-in.");
         // Each provider response is used once, whatever happens next.
         await signInStore.consume(state);
-        back = `/interaction/${encodeURIComponent(pending.uid)}`;
+        if (pending.manage) manage = pending.manage;
+        else back = `/interaction/${encodeURIComponent(pending.uid)}`;
         const instance = pending.remaining[0]!;
         const baseUrl = instances.get(instance)!;
         const code = params.get("code");
@@ -508,6 +641,13 @@ export async function createBroker(config: BrokerConfig) {
         const user = await galaxyUser(baseUrl, { authorization: `Bearer ${login.accessToken}` });
         const next: SignIn = { uid: pending.uid, apiKeys: pending.apiKeys, step: "returned", remaining: pending.remaining.slice(1),
           signedIn: [...pending.signedIn, { instance, baseUrl, login }], users: { ...pending.users, [instance]: user } };
+        if (manage) {
+          // Management uses no cookie: the one-time state already ties this response to the change being made.
+          const progress = { uid: "", manage, apiKeys: next.apiKeys, signedIn: next.signedIn, users: next.users, remaining: next.remaining };
+          if (progress.remaining.length) await signInNext(progress);
+          else await applyChanges(manage, [...progress.apiKeys, ...progress.signedIn]);
+          return;
+        }
         const resume = randomBytes(32).toString("base64url");
         await signInStore.upsert(resume, next, 600);
         // The interaction cookie is scoped to the interaction's path, so the same browser has to return there.
@@ -516,7 +656,8 @@ export async function createBroker(config: BrokerConfig) {
       } catch (error) {
         ctx.status = 400;
         ctx.type = "html";
-        ctx.body = problemPage(error, "Signing in was not completed. Start connecting again from your AI app.", back);
+        const returnTo = manage ? { token: await actionToken({ ...manage, operation: "view" }) } : back;
+        ctx.body = problemPage(error, returnTo ? "Signing in was not completed. Go back to try again." : "Signing in was not completed. Start connecting again from your AI app.", returnTo);
       }
       return;
     }
@@ -584,30 +725,21 @@ export async function createBroker(config: BrokerConfig) {
           const csrf = randomBytes(32).toString("base64url");
           await formStore.upsert(csrf, { uid: details.uid }, 600);
           const offersSignIn = [...instances.keys()].some(name => logins.has(name));
-          const fields = [...instances].map(([name, url]) => {
-            const label = url === "https://usegalaxy.org" ? "US" : name;
-            const key = (labelled: boolean) => `<input id="key-${escape(name)}" name="api_key.${escape(name)}" type="password" autocomplete="off" maxlength="4096" aria-label="API key for ${escape(label)}"${labelled ? "" : ` placeholder="API key"`}>`;
-            if (!logins.has(name)) return `<label for="key-${escape(name)}">${escape(label)} — ${escape(url)}</label>${key(true)}`;
-            // Signing in is this site's usual way to connect; an API key stays one click away.
-            return `<fieldset class="site"><legend>${escape(label)} — ${escape(url)}</legend>
-              <label class="choice"><input type="checkbox" name="login.${escape(name)}" value="yes">Sign in with my ${escape(new URL(url).host)} account (Keycloak)</label>
-              <p class="hint">First time? <a href="${escape(url)}/login/start" target="_blank" rel="noopener noreferrer">Log in to ${escape(new URL(url).host)} with Keycloak</a> once, then come back here.</p>
-              <details><summary>Use an API key instead</summary>${key(false)}</details></fieldset>`;
-          }).join("");
+          const fields = siteFields([...instances.keys()]);
           const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(callbackHost);
           ctx.type = "html";
           ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect Galaxy</title>
-            <style>${cardStyle}label{display:block;margin:20px 0 8px}label.choice{margin:0;display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #b8b8bd;border-radius:10px;cursor:pointer}label.choice:has(input:checked){border-color:#0068da;background:#f0f6ff}input[type=password],select,button{box-sizing:border-box;font:inherit;width:100%;padding:12px;border:1px solid #b8b8bd;border-radius:10px}button{background:#0068da;color:white;border:0;margin-top:20px;cursor:pointer}button[value=cancel]{background:#eee;color:#222}input[type=checkbox]{margin:0;width:18px;height:18px;flex:none}fieldset.site{border:0;padding:0;margin:20px 0 0}fieldset.site legend{padding:0;margin-bottom:8px}details{margin-top:8px}summary{cursor:pointer;color:#0068da;font-size:15px;padding:4px 0;list-style-position:inside}details input{margin-top:8px}.hint{font-size:15px;color:#555;margin:8px 0 0}label.consent{display:flex;gap:10px;align-items:flex-start}label.consent input{margin-top:3px}</style>
+            <style>${cardStyle}${formStyle}</style>
             <main><h1>Connect Galaxy</h1><p><strong>${escape(clientLabel)}</strong> requests access to the Galaxy accounts you select below.</p>
             <p>After authorization, you will return to <strong>${loopback ? `${escape(clientLabel)} on this computer (${escape(callbackHost)})` : escape(callbackHost)}</strong>.</p>
             <form method="post" action="/interaction/${escape(details.uid)}"><input type="hidden" name="csrf" value="${csrf}">
             <p>Choose from the ${instances.size} enabled Galaxy sites below. For each site you want to authorize, enter your own API key${offersSignIn ? " or choose to sign in" : ""}; leave other sites blank. Each connection can include up to 10 sites. Keys belong to their individual servers; do not reuse a key on another server.</p>${fields}
             ${offersSignIn ? "<p class=\"hint\">Signing in takes you to the site's login page and back.</p>" : ""}
-            <p>Your keys are encrypted and kept for this connection for up to 30 days. They are shared only with the Galaxy MCP service, never with the AI client. Revoking this connection removes all its saved keys; simply removing an app may not send a revocation request. Your Galaxy accounts and data are not deleted. To add or replace a server, reconnect with the desired set; existing authorizations are not expanded. You can remove a server from the management page after connecting.</p>
+            <p>Your keys are encrypted and kept for this connection for up to 30 days. They are shared only with the Galaxy MCP service, never with the AI client. Revoking this connection removes all its saved keys; simply removing an app may not send a revocation request. Your Galaxy accounts and data are not deleted. After connecting, you can add sites, switch accounts, replace keys or remove sites from the management page.</p>
             <label class="consent"><input type="checkbox" name="consent" value="yes" required>I allow this client to read my Galaxy data and run analyses on every server for which I entered a key${offersSignIn ? " or chose to sign in" : ""}.</label>
             <button name="action" value="connect">Connect Galaxy</button><button name="action" value="cancel" formnovalidate>Cancel</button></form>
             <p>Missing your Galaxy site? <a href="${escape(new URL("/support#request-site", resource).href)}" target="_blank" rel="noopener noreferrer">Request a site on GitHub</a>. Requests are public and reviewed before a site is enabled. Never post API keys, passwords or private data.</p>
-            <p>Later, ask your connected assistant naturally to remove a site, rotate a key or disconnect Galaxy. It will create a private management link. <a href="/connections">Learn about connection management</a>.</p>
+            <p>Later, ask your connected assistant to “manage my Galaxy connections” to add or remove a site, switch accounts, replace a key or disconnect. It will create a private management link. <a href="/connections">Learn about connection management</a>.</p>
             <small>Only connect clients you trust. To immediately disable all use of this Galaxy key, revoke it in Galaxy.</small></main></html>`;
           return;
         }
@@ -620,24 +752,11 @@ export async function createBroker(config: BrokerConfig) {
           await finish({ error: "access_denied" });
           return;
         }
-        const selected = [...form].filter(([name, key]) => name.startsWith("api_key.") && key).map(([name, key]) => [name.slice(8), key]);
-        const signIns = [...form].filter(([name]) => name.startsWith("login.")).map(([name, value]) => {
-          const instance = name.slice(6);
-          if (value !== "yes" || !logins.has(instance)) throw new errors.InvalidRequest("Invalid connection.");
-          if (selected.some(([chosen]) => chosen === instance)) {
-            throw new ConnectionProblem(`You chose to sign in to ${new URL(instances.get(instance)!).host} and also entered an API key for it. Go back and keep only one of them.`, "Choose one way to connect");
-          }
-          return instance;
-        }).sort();
-        const sites = selected.length + signIns.length;
-        if (!sites || sites > 10 || form.get("consent") !== "yes" || form.get("action") !== "connect") {
+        const { apiKeys, signIns } = readChoices(form, new Set(instances.keys()));
+        const sites = apiKeys.length + signIns.length;
+        if (!sites || sites > MAX_CONNECTIONS || form.get("consent") !== "yes" || form.get("action") !== "connect") {
           throw new errors.InvalidRequest("Invalid connection.");
         }
-        const apiKeys = selected.map(([instance = "", apiKey = ""]) => {
-          const baseUrl = instances.get(instance);
-          if (!baseUrl || !apiKey || apiKey.length > 4096 || /[\r\n]/.test(apiKey)) throw new errors.InvalidRequest("Invalid connection.");
-          return { instance, apiKey, baseUrl };
-        });
         // Verify every key before creating any grant or signing in; a failed site never yields partial consent.
         const users = Object.fromEntries(await Promise.all(apiKeys.map(async ({ instance, baseUrl, apiKey }) =>
           [instance, await galaxyUser(baseUrl, { "x-api-key": apiKey })])));

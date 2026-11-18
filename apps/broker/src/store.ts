@@ -36,8 +36,12 @@ export interface ManagedCredential {
   grantId: string;
   clientId: string;
   expiresAt: number;
-  connections: { instance: string; baseUrl: string }[];
+  /** How each site is connected; an expired sign-in has to be renewed by signing in again. */
+  connections: { instance: string; baseUrl: string; method: "key" | "login"; expired: boolean }[];
 }
+
+/** Most sites one connection can hold, as on the consent page. */
+export const MAX_CONNECTIONS = 10;
 
 export async function createStore(
   connectionString: string, key: Buffer,
@@ -247,8 +251,43 @@ export async function createStore(
         grantId: row.grant_id,
         clientId: row.client_id,
         expiresAt: Number(row.expires_at),
-        connections: payload.connections.map(({ instance, baseUrl }) => ({ instance, baseUrl })),
+        connections: payload.connections.map(connection => ({
+          instance: connection.instance, baseUrl: connection.baseUrl,
+          method: "login" in connection ? "login" as const : "key" as const,
+          expired: "login" in connection && connection.login.expired === true,
+        })),
       };
+    },
+    /**
+     * Adds sites to a connection or replaces how existing sites are connected, keeping the grant.
+     * A replaced site's run subscriptions belonged to its previous account, so they end.
+     */
+    async updateConnections(accountId: string, grantId: string, changes: Connection[]) {
+      const db = await pool.connect();
+      try {
+        await db.query("BEGIN");
+        const result = await db.query<CredentialRow & { grant_id: string }>(
+          "SELECT * FROM galaxy_broker_credentials WHERE grant_id=$1 AND account_id=$2 AND expires_at>$3 FOR UPDATE", [grantId, accountId, Date.now()]);
+        const row = result.rows[0];
+        if (!row) { await db.query("ROLLBACK"); return false; }
+        const value = rowValue(row);
+        const { connections: current } = decrypt<Pick<Credential, "connections">>(row.payload, binding(row.grant_id, value));
+        const replaced = new Set(changes.map(change => change.instance));
+        const connections = [...current.filter(connection => !replaced.has(connection.instance)), ...changes]
+          .sort((a, b) => a.instance.localeCompare(b.instance));
+        if (!changes.length || connections.length > MAX_CONNECTIONS) { await db.query("ROLLBACK"); return false; }
+        const next = { ...value, instance: connections[0]!.instance };
+        await db.query("UPDATE galaxy_broker_credentials SET instance=$1,payload=$2 WHERE grant_id=$3", [
+          next.instance, encrypt({ connections }, binding(row.grant_id, next)), grantId,
+        ]);
+        const ended = current.filter(connection => replaced.has(connection.instance)).map(connection => connection.instance);
+        if (ended.length) await db.query("DELETE FROM galaxy_broker_events WHERE grant_id=$1 AND instance = ANY($2)", [grantId, ended]);
+        await db.query("COMMIT");
+        return true;
+      } catch (error) {
+        await db.query("ROLLBACK");
+        throw error;
+      } finally { db.release(); }
     },
     async removeConnection(accountId: string, grantId: string, instance: string) {
       const db = await pool.connect();

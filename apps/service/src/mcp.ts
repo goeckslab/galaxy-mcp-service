@@ -713,7 +713,7 @@ export function createGalaxyMcpHandler(
       if (authInfo !== undefined && createManagementLink !== undefined) server.registerTool(
         "get_connection_management_link",
         {
-          description: "Create a one-time link, valid for five minutes, for the user to view or disconnect Galaxy sites authorized by this plugin identity. Use only when the user asks to manage, remove, rotate or revoke a connection. Creating the link changes no Galaxy access by itself.",
+          description: "Create a one-time link, valid for five minutes, where the user can add a Galaxy site, switch a site to another account or API key, sign in again, remove a site, or disconnect this plugin identity. Use only when the user asks for one of these. Creating the link changes no Galaxy access by itself.",
           inputSchema: z.object({}).strict(),
           outputSchema: z.object({ url: z.string().url(), expires_in: z.number().int().positive(), message: z.string() }),
           annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
