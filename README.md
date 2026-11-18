@@ -126,7 +126,7 @@ The protocol and callback behavior follow [MCP Events in ChatGPT](https://develo
 
 Run `pnpm check` for lint, type and service checks; see [validation prerequisites and commands](docs/client-compatibility.md#run-the-automated-checks) for broker and deployment tests. CI builds the container for `linux/amd64` without Galaxy credentials; it does not deploy infrastructure.
 
-The ops dependency is pinned to npm `0.1.0`, with a [temporary patch](patches/@galaxyproject__galaxy-ops@0.1.0.patch) for nested input templates, numeric constraints and resumable requests. Remove the patch when an official dependency release includes the fixes; do not copy the upstream library into this repository.
+The ops dependency is pinned to npm `0.1.0` and used unmodified. `run_tool`, `get_tool_request_status` and `get_tool_input_template` come from [tool-requests.ts](apps/service/src/tool-requests.ts) instead: they submit through Galaxy's tool request API and return at once, read a request's progress, and give the nested input template that API takes, which galaxy-ops does not offer (its `run_tool` still posts to the legacy `/api/tools`). Replace them with galaxy-ops' own once a release does; do not copy the upstream library into this repository.
 
 `POST /mcp` is the stateless tool endpoint; `GET /healthz` checks process health and `GET /readyz` checks readiness. Neither health route proves a successful client login or Galaxy analysis. Logs must contain protocol metadata only, never credentials, authorization headers, user/report content or credential-bearing URLs.
 

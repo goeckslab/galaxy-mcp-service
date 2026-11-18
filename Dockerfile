@@ -10,7 +10,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig*.json ./
 COPY apps/service/package.json apps/service/package.json
 COPY apps/broker/package.json apps/broker/package.json
 COPY packages/protocol/package.json packages/protocol/package.json
-COPY patches patches
 RUN pnpm install --frozen-lockfile
 
 COPY apps apps
@@ -29,7 +28,6 @@ COPY --chown=node:node LICENSE package.json pnpm-lock.yaml pnpm-workspace.yaml .
 COPY --chown=node:node apps/service/package.json apps/service/package.json
 COPY --chown=node:node apps/broker/package.json apps/broker/package.json
 COPY --chown=node:node packages/protocol/package.json packages/protocol/package.json
-COPY --chown=node:node patches patches
 
 USER node
 RUN pnpm install --prod --frozen-lockfile

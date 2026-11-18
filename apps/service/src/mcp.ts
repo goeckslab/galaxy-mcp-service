@@ -3,8 +3,8 @@ import {
   allOperations,
   getHistories,
   runWithEnvelope,
-  submitToolOp,
   type AnyOperation,
+  type GalaxyContext,
 } from "@galaxyproject/galaxy-ops";
 import {
   createMcpHandler,
@@ -24,6 +24,7 @@ import { historyPurposeInput, recordHistoryPurpose, recordRunPurpose, runPurpose
 import { registerRunEvents } from "./events.js";
 import type { EventRequest } from "@galaxy-mcp-service/protocol";
 import { toolTitles } from "./tool-titles.js";
+import { toolRequestOperations } from "./tool-requests.js";
 
 export type { GalaxyConnection } from "./galaxy-connection.js";
 
@@ -56,9 +57,13 @@ const productOperationNames = new Set<string>([
   "import_workflow_from_iwc",
 ]);
 
+// run_tool, get_tool_request_status and get_tool_input_template use the tool request API (tool-requests.ts),
+// listed where they always were: the status read right after run_tool.
+const ownOperations = new Map(toolRequestOperations.map(operation => [operation.name, operation]));
 export const productOperations = allOperations
   .filter(({ name }) => productOperationNames.has(name))
-  .map((operation) => operation.name === "run_tool" ? { ...submitToolOp, name: "run_tool" } : operation);
+  .flatMap(operation => operation.name === "run_tool" ? [ownOperations.get("run_tool")!, ownOperations.get("get_tool_request_status")!]
+    : [ownOperations.get(operation.name) ?? operation]);
 if (productOperations.length !== productOperationNames.size) throw new Error("A configured Galaxy operation is unavailable");
 
 // Public catalogs/URL fetches are not private-account reads. Generic execution can
@@ -466,6 +471,17 @@ async function runDatasetHtml(
   };
 }
 
+/** runWithEnvelope, keeping a failed tool request's handle so the caller resumes it instead of resubmitting. */
+async function envelope(operation: AnyOperation, args: Record<string, unknown>, galaxy: GalaxyContext) {
+  let recovery: unknown;
+  const watched = { ...operation, run: async (input: never, ctx: GalaxyContext) => {
+    try { return await operation.run(input, ctx); }
+    catch (error) { recovery = (error as { recovery?: unknown } | null)?.recovery; throw error; }
+  } } as AnyOperation;
+  const result = await runWithEnvelope(watched, args, galaxy);
+  return !result.success && recovery !== undefined ? { ...result, recovery } : result;
+}
+
 async function runGalaxyOperation(
   operation: AnyOperation,
   args: Record<string, unknown>,
@@ -487,7 +503,7 @@ async function runGalaxyOperation(
   if (operation.name === "run_tool" && typeof args.purpose === "string") {
     const { purpose, ...run } = args;
     const galaxy = context(connection, signal);
-    const submitted = await runWithEnvelope(operation, run, galaxy);
+    const submitted = await envelope(operation, run, galaxy);
     const { toolRequestId, historyId } = (submitted.data ?? {}) as { toolRequestId?: unknown; historyId?: unknown };
     if (!submitted.success || typeof toolRequestId !== "string") return structured(submitted);
     const annotated = await recordRunPurpose(purpose, toolRequestId, typeof historyId === "string" ? historyId : undefined, galaxy);
@@ -498,14 +514,14 @@ async function runGalaxyOperation(
   if (operation.name === "create_history" && typeof args.purpose === "string") {
     const { purpose, ...history } = args;
     const galaxy = context(connection, signal);
-    const created = await runWithEnvelope(operation, history, galaxy);
+    const created = await envelope(operation, history, galaxy);
     const historyId = (created.data as { id?: unknown } | undefined)?.id;
     if (!created.success || typeof historyId !== "string") return structured(created);
     const recorded = await recordHistoryPurpose(purpose, historyId, galaxy);
     return structured({ ...created, purpose_recorded: recorded,
       message: `${created.message ?? ""} ${recorded ? "Purpose saved as the history's annotation." : "The purpose could not be saved."}`.trim() });
   }
-  const result = await runWithEnvelope(operation, args, context(connection, signal));
+  const result = await envelope(operation, args, context(connection, signal));
   if (operation.name === "get_history_details") {
     if (!result.success) return toolError(result.message ?? "Galaxy did not return history details.");
     const history = historyDetailsOutput.safeParse(result.data);

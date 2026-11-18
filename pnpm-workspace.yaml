@@ -5,5 +5,3 @@ packages:
 allowBuilds:
   esbuild: true
 
-patchedDependencies:
-  '@galaxyproject/galaxy-ops@0.1.0': patches/@galaxyproject__galaxy-ops@0.1.0.patch

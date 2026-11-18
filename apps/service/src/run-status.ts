@@ -1,4 +1,6 @@
-import { getInvocations, getToolDetails, getToolRequestStatus, type GalaxyContext } from "@galaxyproject/galaxy-ops";
+import { getInvocations, getToolDetails, type GalaxyContext } from "@galaxyproject/galaxy-ops";
+
+import { getToolRequestStatus } from "./tool-requests.js";
 
 export type RunKind = "tool" | "workflow";
 export type RunState = "accepted" | "queued" | "running" | "completed" | "failed" | "cancelled" | "empty" | "unknown";
@@ -80,8 +82,9 @@ async function readTool(run: RunStatus, ctx: GalaxyContext): Promise<void> {
   const states: Record<string, number> = {};
   let failureReason: string | undefined;
   for (const job of status.jobs) {
-    states[job.state] = (states[job.state] ?? 0) + 1;
-    if (["error", "failed"].includes(job.state)) failureReason ??= jobFailureMessage(job);
+    const state = job.state ?? "unknown";
+    states[state] = (states[state] ?? 0) + 1;
+    if (["error", "failed"].includes(state)) failureReason ??= jobFailureMessage(job);
   }
   run.jobs = countJobs(states);
   run.state = status.requestState === "failed" ? "failed"
