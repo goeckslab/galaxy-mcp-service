@@ -20,7 +20,21 @@ export const connectionSource = (connection: GalaxyConnection) => ({
   instance: connection.instance ?? new URL(connection.baseUrl).host, url: connection.baseUrl,
 });
 
+/**
+ * Sites of the authenticated connection whose sign-in has ended, keyed by the connection list every tool
+ * receives, so a call to such a site can say how to renew it instead of calling it unauthorized.
+ */
+const signInsNeeded = new WeakMap<GalaxyConnection[], { instance: string; url: string }[]>();
+export const signInNeeded = (connections: GalaxyConnection[]) => signInsNeeded.get(connections) ?? [];
+
 export function authenticatedGalaxies(authInfo: AuthInfo): GalaxyConnection[] {
+  const connections = usableGalaxies(authInfo);
+  const needed = z.array(galaxySource).max(10).safeParse(authInfo.extra?.signInNeeded ?? []);
+  if (needed.success && needed.data.length) signInsNeeded.set(connections, needed.data);
+  return connections;
+}
+
+function usableGalaxies(authInfo: AuthInfo): GalaxyConnection[] {
   const values = authInfo.extra?.galaxies;
   if (!Array.isArray(values) || !values.length || values.length > 10) return [];
   const parsed = z.array(z.object({
@@ -43,6 +57,14 @@ export async function withGalaxy(
 ): Promise<CallToolResult> {
   const connection = instance === undefined ? (connections.length === 1 ? connections[0] : undefined)
     : connections.find(value => connectionSource(value).instance === instance);
+  const needed = signInNeeded(connections);
+  const expired = needed.find(value => value.instance === instance) ?? (!connection && !connections.length ? needed[0] : undefined);
+  if (!connection && expired) {
+    const others = needed.filter(value => value !== expired).map(value => value.instance);
+    return { isError: true, content: [{ type: "text", text:
+      `The sign-in for ${expired.instance} (${expired.url}) has expired${others.length ? `, as have ${others.join(", ")}` : ""}. Tell the user, and offer get_connection_management_link so they can choose "Sign in again" there; the other sites keep working. No Galaxy request was sent.`,
+    }] };
+  }
   if ((!connection && instance !== undefined) || (instance === undefined && connections.length > 1)) {
     return { isError: true, content: [{ type: "text", text:
       `${instance === undefined ? "Choose an instance" : "That instance is not authorized"}. Use get_galaxy_connections, then pass instance explicitly. Authorized aliases: ${connections.map(value => connectionSource(value).instance).join(", ") || "none"}. No Galaxy request was sent.`,

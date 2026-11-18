@@ -1058,6 +1058,24 @@ describe("durable Galaxy credential broker", () => {
       expect((await (await introspect(renewed.access_token)).json()).galaxy_connections).toHaveLength(1);
       expect(provider.refreshes).toBe(2);
       vi.useRealTimers();
+      expect(await (await introspect(renewed.access_token)).json()).toMatchObject({ galaxy_sign_in_needed: [{ instance: "test", url: signInConfig.instances.test }] });
+
+      // The management page marks the ended sign-in; signing in again restores that site alone.
+      provider.ended = false;
+      const renewing = new Browser();
+      const expiredPage = await managementPage(renewed.access_token, renewing);
+      expect(expiredPage).toContain('<span class="status warn">Sign-in expired</span>');
+      const renewForm = await (await managementPost("action", { action_token: buttonToken(expiredPage, "Sign in again")! }, renewing)).text();
+      expect(renewForm).toContain("<h1>Change test</h1>");
+      expect(renewForm).toContain('<span class="status">Now: Sign-in expired</span>');
+      const renewSave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(renewForm)![1]!;
+      const toProvider = await managementPost("save", { action_token: renewSave, consent: "yes", "login.test": "yes" }, renewing);
+      const renewAt = /http-equiv="refresh" content="0;url=([^"]+)"/.exec(await toProvider.text())![1]!.replaceAll("&amp;", "&");
+      const renewed2 = await renewing.request((await fetch(renewAt, { redirect: "manual" })).headers.get("location")!);
+      expect(await renewed2.text()).toContain("test updated.");
+      const restored = await (await introspect(renewed.access_token)).json() as { galaxy_connections: Array<{ instance: string }> };
+      expect(restored.galaxy_connections.map(value => value.instance)).toEqual(["test", "us"]);
+      expect(restored).not.toHaveProperty("galaxy_sign_in_needed");
 
       // A sign-in Galaxy has not linked to an account yet says what to do instead of failing silently.
       provider.ended = false;
@@ -1114,6 +1132,25 @@ describe("durable Galaxy credential broker", () => {
       expect(added.galaxy_connections[0]!.access_token).toMatch(/^fixture-access-/);
       // The provider's response is single-use here too.
       expect((await managing.request(returning)).status).toBe(400);
+
+      // When the only site's sign-in ends, the grant stays active so the user can sign in again from management.
+      await database.query("DELETE FROM galaxy_broker_limits"); // this test alone reaches the per-address limit
+      const only = await connect({ "login.test": "yes" });
+      const onlyBack = await only.auth.browser.request(only.back);
+      expect(onlyBack.status).toBe(303);
+      let onlyResponse = await resume(only.auth, await only.auth.browser.request(onlyBack.headers.get("location")!));
+      while (onlyResponse.status === 303 && new URL(onlyResponse.headers.get("location")!, config.issuer).origin === config.issuer) {
+        onlyResponse = await only.auth.browser.request(new URL(onlyResponse.headers.get("location")!, config.issuer).href);
+      }
+      const onlyTokens = await (await exchange({ ...only.auth, code: new URL(onlyResponse.headers.get("location")!).searchParams.get("code")! })).json() as Tokens;
+      provider.ended = true;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 250_000);
+      expect(await (await introspect(onlyTokens.access_token)).json()).toMatchObject({
+        active: true, galaxy_connections: [], galaxy_sign_in_needed: [{ instance: "test", url: signInConfig.instances.test }],
+      });
+      expect((await managementLink(onlyTokens.access_token)).status).toBe(200);
+      vi.useRealTimers();
     } finally {
       vi.useRealTimers();
       await close(idp);

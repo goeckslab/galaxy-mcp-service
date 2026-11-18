@@ -53,7 +53,9 @@ const activeTokenSchema = z
     galaxy_connections: z.array(z.union([
       z.object({ instance: z.string().min(1), api_key: z.string().min(1), url: z.string().min(1) }).strict(),
       z.object({ instance: z.string().min(1), access_token: z.string().min(1), url: z.string().min(1) }).strict(),
-    ])).min(1).max(10),
+    ])).max(10),
+    // Sites whose sign-in has ended; the user renews them from the connection-management page.
+    galaxy_sign_in_needed: z.array(z.object({ instance: z.string().min(1), url: z.string().min(1) }).strict()).max(10).optional(),
     iss: z.string().min(1),
     scope: z.union([z.string(), z.array(z.string())]),
     sub: z.string().min(1),
@@ -179,12 +181,15 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         : parsed.data.scope.split(/\s+/).filter(Boolean);
       const audiences = Array.isArray(parsed.data.aud) ? parsed.data.aud : [parsed.data.aud];
       const values = parsed.data.galaxy_connections;
+      const signInNeeded = parsed.data.galaxy_sign_in_needed ?? [];
+      const sites = [...values, ...signInNeeded];
       if (
         parsed.data.iss !== metadata.data.issuer ||
         !audiences.includes(resourceServerUrl.href) ||
         parsed.data.exp <= Date.now() / 1000 ||
-        new Set(values.map(value => value.instance)).size !== values.length ||
-        values.some(value => !instances.has(value.instance) || value.url !== instances.get(value.instance))
+        !sites.length || sites.length > 10 ||
+        new Set(sites.map(value => value.instance)).size !== sites.length ||
+        sites.some(value => !instances.has(value.instance) || value.url !== instances.get(value.instance))
       ) {
         throw new OAuthError(OAuthErrorCode.InvalidToken, "The access token is not valid for this service.");
       }
@@ -200,6 +205,7 @@ export async function loadUniversalAuth(config: UniversalAuthConfig): Promise<Un
         extra: {
           subject: parsed.data.sub,
           galaxies: connections,
+          signInNeeded: signInNeeded.map(({ instance }) => ({ instance, url: instances.get(instance)! })),
         },
       };
     },

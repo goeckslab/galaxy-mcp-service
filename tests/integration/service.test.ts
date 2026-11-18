@@ -122,6 +122,12 @@ describe("HTTP MCP service", () => {
         const token = new URLSearchParams(await request.text()).get("token");
         if (brokerUnavailable) return Response.json({}, { status: 503 });
         if (token === "inactive" || (revoked && token === "token-eu")) return Response.json({ active: false });
+        // us still works while eu's sign-in has ended; or every site needs signing in again.
+        if (token === "token-partial" || token === "token-renew") return Response.json({
+          active: true, aud: resource, client_id: "chatgpt", exp: Math.floor(Date.now() / 1000) + 60, iss: issuer, scope: "galaxy:full", sub: "user-signin",
+          galaxy_connections: token === "token-partial" ? [{ instance: "us", api_key: "key-us", url: "https://us.example.test" }] : [],
+          galaxy_sign_in_needed: [{ instance: "eu", url: "https://eu.example.test" }],
+        });
         const instance = token === "token-eu" ? "eu" : token === "token-unknown" ? "unknown" : "us";
         return Response.json({
           active: true,
@@ -211,6 +217,32 @@ describe("HTTP MCP service", () => {
         });
       }));
 
+      const call = async (token: string, name: string, args: Record<string, unknown>) => {
+        const request = modernRequest("tools/call", { name, arguments: args });
+        request.headers.set("authorization", `Bearer ${token}`);
+        const response = await fetch(`${configured.baseUrl}/mcp`, { method: "POST", headers: request.headers, body: JSON.stringify(request.body) });
+        expect(response.status).toBe(200);
+        return (await response.json() as { result: { isError?: boolean; structuredContent?: unknown; content: Array<{ text: string }> } }).result;
+      };
+      // A site whose sign-in ended is named as such, with the way to renew it; the other site keeps working.
+      const callsBefore = calls.length;
+      expect((await call("token-partial", "get_galaxy_connections", {})).structuredContent).toEqual({
+        connections: [{ instance: "us", url: "https://us.example.test" }], needs_sign_in: [{ instance: "eu", url: "https://eu.example.test" }],
+      });
+      const expiredSite = await call("token-partial", "get_histories", { instance: "eu" });
+      expect(expiredSite.isError).toBe(true);
+      expect(expiredSite.content[0]!.text).toContain("The sign-in for eu (https://eu.example.test) has expired");
+      expect(expiredSite.content[0]!.text).toContain("get_connection_management_link");
+      expect((await call("token-partial", "get_histories", { limit: 1 })).structuredContent).toMatchObject({ histories: [{ id: "h-us" }] });
+      // With every site expired the connection stays usable for renewing it.
+      const renew = await call("token-renew", "get_histories", { limit: 1 });
+      expect(renew.isError).toBe(true);
+      expect(renew.content[0]!.text).toContain("The sign-in for eu");
+      expect((await call("token-renew", "get_galaxy_connections", {})).structuredContent).toEqual({
+        connections: [], needs_sign_in: [{ instance: "eu", url: "https://eu.example.test" }],
+      });
+      expect(calls.slice(callsBefore).filter(value => value.includes("eu.example.test"))).toEqual([]);
+
       const management = modernRequest("tools/call", { name: "get_connection_management_link", arguments: {} });
       management.headers.set("authorization", "Bearer token-us");
       const managementResponse = await fetch(`${configured.baseUrl}/mcp`, {
@@ -243,8 +275,10 @@ describe("HTTP MCP service", () => {
       expect(calls.filter((call) => call.includes("/api/histories")).sort()).toEqual([
         "GET eu.example.test/api/histories",
         "GET us.example.test/api/histories",
+        // The working site of the partly expired connection.
+        "GET us.example.test/api/histories",
       ]);
-      expect(calls.filter((call) => call.endsWith("/oauth/introspect"))).toHaveLength(8);
+      expect(calls.filter((call) => call.endsWith("/oauth/introspect"))).toHaveLength(13);
       expect(calls.filter((call) => call.endsWith("/management/ticket"))).toHaveLength(1);
       expect(calls[0]).toBe(
         "GET auth.example.test/.well-known/oauth-authorization-server",

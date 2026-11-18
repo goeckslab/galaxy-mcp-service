@@ -776,15 +776,19 @@ export async function createBroker(config: BrokerConfig) {
       const token = oidc.accessToken;
       const credential = token?.grantId ? await store.freshCredential(token.grantId) : undefined;
       const connections = credential && usableConnections(credential.connections);
+      // A site whose sign-in ended stays in the grant until the user signs in again from the management page,
+      // so the grant remains active, and manageable, even when every site needs signing in again.
+      const signInNeeded = credential?.connections.filter(value => "login" in value && value.login.expired) ?? [];
       if (oidc.client?.clientId !== config.resourceClientId || !credential || !token || credential.accountId !== token.accountId
         || credential.clientId !== token.clientId || credential.audience !== token.aud
-        || !connections?.length || credential.connections.some(value => value.baseUrl !== instances.get(value.instance))) {
+        || !credential.connections.length || credential.connections.some(value => value.baseUrl !== instances.get(value.instance))) {
         ctx.body = { active: false };
       } else {
         Object.assign(ctx.body, {
-          galaxy_connections: connections.map(value => value.tokenType === "bearer"
+          galaxy_connections: connections!.map(value => value.tokenType === "bearer"
             ? { instance: value.instance, access_token: value.apiKey, url: value.baseUrl }
             : { instance: value.instance, api_key: value.apiKey, url: value.baseUrl }),
+          ...(signInNeeded.length && { galaxy_sign_in_needed: signInNeeded.map(({ instance, baseUrl }) => ({ instance, url: baseUrl })) }),
         });
       }
     }

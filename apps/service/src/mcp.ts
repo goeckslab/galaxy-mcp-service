@@ -15,7 +15,7 @@ import {
 import { z } from "zod";
 
 import { HISTORY_SUMMARY_URI, registerHistorySummaryResource } from "./history-summary-ui.js";
-import { authenticatedGalaxies, connectionSource, createRequestGalaxyContext, galaxySource, instanceInput, sourceOutput, withGalaxy, type GalaxyConnection } from "./galaxy-connection.js";
+import { authenticatedGalaxies, connectionSource, createRequestGalaxyContext, galaxySource, instanceInput, signInNeeded, sourceOutput, withGalaxy, type GalaxyConnection } from "./galaxy-connection.js";
 import { readRunStatus } from "./run-status.js";
 import { registerReportReader } from "./report-reader.js";
 import { registerCollections } from "./collections.js";
@@ -683,11 +683,14 @@ export function createGalaxyMcpHandler(
 
       registerHistorySummaryResource(server, uiDomain, authOrigin, [...new Set(connections.map(connection => new URL(connection.baseUrl).origin))]);
       server.registerTool("get_galaxy_connections", {
-        description: "List only the Galaxy instances authorized for this connection, with their routing aliases and URLs; no credentials. Select an instance explicitly on every call when more than one is connected. Histories and identifiers belong to their source site; this does not transfer data between sites.",
+        description: "List only the Galaxy instances authorized for this connection, with their routing aliases and URLs; no credentials. Select an instance explicitly on every call when more than one is connected. Sites under needs_sign_in cannot be used until the user signs in again on the connection-management page. Histories and identifiers belong to their source site; this does not transfer data between sites.",
         inputSchema: z.object({}).strict(),
-        outputSchema: z.object({ connections: z.array(galaxySource) }),
+        outputSchema: z.object({ connections: z.array(galaxySource), needs_sign_in: z.array(galaxySource).optional() }),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      }, () => structured({ connections: connections.map(connectionSource) }));
+      }, () => {
+        const needed = signInNeeded(connections);
+        return structured({ connections: connections.map(connectionSource), ...(needed.length && { needs_sign_in: needed }) });
+      });
       server.registerTool("show_galaxy", {
         description: "Open the Galaxy panel to browse authorized sites, histories and reports without adding a card for each lookup. Can also open an existing analysis using kind and runId together. Never submits an analysis. Clients without Plugin Extensions can use the same MCP Apps view or the read-only tools.",
         inputSchema: z.object({ ...instanceInput, kind: runStatusInput.shape.kind.optional(), runId: runStatusInput.shape.runId.optional() }).strict(),
