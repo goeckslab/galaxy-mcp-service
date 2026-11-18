@@ -78,10 +78,24 @@ async function authorization(client = "client-a", overrides: Record<string, stri
   return { browser, location, csrf: csrf!, verifier, client, html };
 }
 
+/**
+ * The fields a person sends by ticking sites: "api_key.<site>" with a key ticks that site and uses the key,
+ * "login.<site>" ticks it and chooses to sign in. Other fields pass through unchanged.
+ */
+function ticked(fields: Record<string, string>) {
+  const result: Record<string, string> = {};
+  for (const [name, value] of Object.entries(fields)) {
+    if (name.startsWith("login.")) { result[`site.${name.slice(6)}`] = "yes"; result[`method.${name.slice(6)}`] = "login"; continue; }
+    result[name] = value;
+    if (name.startsWith("api_key.") && value) { result[`site.${name.slice(8)}`] = "yes"; result[`method.${name.slice(8)}`] = "key"; }
+  }
+  return result;
+}
+
 async function consent(auth: Awaited<ReturnType<typeof authorization>>, instance: "us" | "eu" = "us", changes: Record<string, string> = {}) {
   return auth.browser.request(auth.location, {
     method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ csrf: auth.csrf, [`api_key.${instance}`]: keys[instance], consent: "yes", action: "connect", ...changes }),
+    body: new URLSearchParams(ticked({ csrf: auth.csrf, [`api_key.${instance}`]: keys[instance], consent: "yes", action: "connect", ...changes })),
   });
 }
 
@@ -102,7 +116,7 @@ async function codeFor(instance: "us" | "eu" = "us", client = "client-a", browse
   const auth = await authorization(client, parameters, browser);
   let response = await resume(auth, await (connectionFields ? auth.browser.request(auth.location, {
     method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", ...connectionFields }),
+    body: new URLSearchParams(ticked({ csrf: auth.csrf, consent: "yes", action: "connect", ...connectionFields })),
   }) : consent(auth, instance)));
   for (let step = 0; step < 10; step++) {
     if (response.status === 200) {
@@ -189,7 +203,7 @@ function buttonToken(html: string, text: string) {
 
 async function managementPost(path: "action" | "save", fields: Record<string, string>, browser = new Browser()) {
   return browser.request(`${config.issuer}/connections/${path}`, {
-    method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields),
+    method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(ticked(fields)),
   });
 }
 
@@ -454,9 +468,10 @@ describe("durable Galaxy credential broker", () => {
     handler = broker.callback;
     try {
       const { html } = await authorization();
-      expect(html).toContain('<label for="key-us">US — https://usegalaxy.org</label>');
+      expect(html).toContain('<input type="checkbox" name="site.us" value="yes"><span class="name">Galaxy US</span><span class="host">usegalaxy.org</span>');
       expect(html).toContain('id="key-us" name="api_key.us"');
-      expect(html).toContain('aria-label="API key for US"');
+      expect(html).toContain('aria-label="API key for Galaxy US"');
+      expect(html).toContain('href="https://usegalaxy.org/user/api_key"');
       expect(html).not.toContain('api_key.main');
       expect(html).toContain('name="api_key.eu"');
       expect(apiRequests).toHaveLength(before);
@@ -671,15 +686,15 @@ describe("durable Galaxy credential broker", () => {
       const auth = await authorization();
       expect(auth.html).toContain('name="api_key.us"');
       expect(auth.html).toContain('name="api_key.eu"');
-      expect(auth.html).toContain("Choose from the 2 enabled Galaxy sites below.");
+      expect(auth.html).toContain("Tick the Galaxy sites to connect.");
       expect(auth.html).toContain('href="http://127.0.0.1/support#request-site"');
       expect(auth.html).toContain("Request a site on GitHub");
       expect(auth.html).toContain("Never post API keys, passwords or private data.");
-      expect(auth.html).toContain("every server for which I entered a key");
+      expect(auth.html).toContain("I allow client-a to read my Galaxy data and run analyses on the sites I ticked.");
       expect(auth.html).toContain("to add or remove a site, switch accounts, replace a key or disconnect");
       const response = await auth.browser.request(auth.location, { method: "POST",
         headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields }),
+        body: new URLSearchParams(ticked({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields })),
       });
       expect(response.status).toBe(400);
       expect(await response.text()).not.toContain(keys.us);
@@ -692,6 +707,21 @@ describe("durable Galaxy credential broker", () => {
     const single = await exchange(await codeFor("us", "client-a", undefined, {}, { "api_key.us": keys.us, "api_key.eu": "" }));
     expect(single.status).toBe(200);
     expect(await (await introspect((await single.json()).access_token)).json()).toMatchObject({ active: true, galaxy_connections: [{ instance: "us", api_key: keys.us }] });
+  });
+
+  it("connects only the ticked sites, ignoring a key left in a site that was unticked", async () => {
+    const auth = await authorization();
+    const response = await resume(auth, await auth.browser.request(auth.location, {
+      method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", "site.us": "yes", "api_key.us": `  ${keys.us}  `, "api_key.eu": "typed-then-unticked" }),
+    }));
+    let next = response;
+    while (next.status === 303 && new URL(next.headers.get("location")!, config.issuer).origin === config.issuer) {
+      next = await auth.browser.request(new URL(next.headers.get("location")!, config.issuer).href);
+    }
+    const issued = await (await exchange({ ...auth, code: new URL(next.headers.get("location")!).searchParams.get("code")! })).json() as Tokens;
+    expect((await (await introspect(issued.access_token)).json()).galaxy_connections).toEqual([{ instance: "us", api_key: keys.us, url: config.instances.us }]);
+    expect(apiRequests.join(" ")).not.toContain("typed-then-unticked");
   });
 
   it("invalidates the complete bundle if any allowed site is remapped", async () => {
@@ -987,7 +1017,7 @@ describe("durable Galaxy credential broker", () => {
     const connect = async (fields: Record<string, string>, browser = new Browser()) => {
       const auth = await authorization("client-a", {}, browser);
       const submitted = await auth.browser.request(auth.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields }) });
+        body: new URLSearchParams(ticked({ csrf: auth.csrf, consent: "yes", action: "connect", ...fields })) });
       expect(submitted.status).toBe(200);
       expect(submitted.headers.get("content-security-policy")).toContain("form-action 'self'");
       const html = await submitted.text();
@@ -1000,12 +1030,11 @@ describe("durable Galaxy credential broker", () => {
     };
     try {
       const form = await authorization();
-      expect(form.html).toContain('name="login.test"');
-      expect(form.html).not.toContain('name="login.us"');
-      expect(form.html).toContain("chose to sign in");
+      expect(form.html).not.toContain('name="method.us"');
       expect(form.html).toContain(`First time? <a href="${signInConfig.instances.test}/login/start"`);
-      // Signing in is offered first; the key field for that site sits behind "Use an API key instead".
-      expect(form.html).toMatch(/name="login\.test"[^]*<details><summary>Use an API key instead<\/summary><input id="key-test" name="api_key\.test"/);
+      // Ticking the site opens it with signing in chosen; the API key is the other choice.
+      expect(form.html).toMatch(/name="site\.test" value="yes">[^]*name="method\.test" value="login" checked>[^]*name="method\.test" value="key">Use an API key instead[^]*name="api_key\.test"/);
+      expect(form.html).toContain(`href="${config.instances.us}/user/api_key"`);
       expect(form.html).toContain("return to <strong>client-a on this computer (127.0.0.1)</strong>");
 
       const { auth, back } = await connect({ "login.test": "yes", "api_key.us": keys.us });
@@ -1092,7 +1121,7 @@ describe("durable Galaxy credential broker", () => {
       const backTo = /<a class="button secondary" href="([^"]+)">Back to Connect Galaxy<\/a>/.exec(refusal)![1]!;
       const again = await unlinked.auth.browser.request(new URL(backTo, config.issuer).href);
       expect(again.status).toBe(200);
-      expect(await again.text()).toContain('name="login.test"');
+      expect(await again.text()).toContain('name="method.test"');
 
       // Cancelling at the provider, a replayed callback, and a key together with sign-in for one site are refused.
       provider.nextUser = "signin-user";
@@ -1102,18 +1131,19 @@ describe("durable Galaxy credential broker", () => {
       expect(await (await cancelled.auth.browser.request(url.href)).text()).toContain("was not completed");
       expect((await cancelled.auth.browser.request(cancelled.back)).status).toBe(400);
       const both = await authorization();
+      // Choosing the API key for a ticked site needs the key; the page says so and offers a way back.
       const bothRefused = (await both.browser.request(both.location, { method: "POST", headers: { origin: config.issuer, "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ csrf: both.csrf, consent: "yes", action: "connect", "login.test": "yes", "api_key.test": "fixture-other-key" }) }));
+        body: new URLSearchParams({ csrf: both.csrf, consent: "yes", action: "connect", "site.test": "yes", "method.test": "key", "api_key.test": "" }) }));
       expect(bothRefused.status).toBe(400);
       const bothText = await bothRefused.text();
-      expect(bothText).toContain("Choose one way to connect");
+      expect(bothText).toContain("API key missing");
       expect(bothText).toContain(`<a class="button" href="/interaction/`);
 
       // A key-only connection can add the site by signing in from the management page, with no browser cookie.
       const plain = await tokens("us");
       const managing = new Browser();
       const addForm = await (await managementPost("action", { action_token: buttonToken(await managementPage(plain.access_token, managing), "Add a Galaxy site")! }, managing)).text();
-      expect(addForm).toContain('name="login.test"');
+      expect(addForm).toContain('name="method.test"');
       expect(addForm).toContain("First time?");
       const addSave = /action="\/connections\/save"><input type="hidden" name="action_token" value="([^"]+)"/.exec(addForm)![1]!;
       const leaving = await managementPost("save", { action_token: addSave, consent: "yes", "login.test": "yes" }, managing);
