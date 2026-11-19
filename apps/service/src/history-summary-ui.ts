@@ -44,6 +44,7 @@ const HTML = `<!doctype html>
     }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
     .header-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+    .card[data-collapsed="true"] > :not(header) { display: none !important; }
     .workspace-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
     .workspace-nav select { min-width: 0; max-width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 10px; color: var(--text); background: var(--surface); font: inherit; font-size: .8rem; }
     .workspace-nav select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
@@ -168,7 +169,7 @@ const HTML = `<!doctype html>
     }
     @media (max-width: 759px) { .workspace[data-detail-open="true"][data-files-visible="true"] #dataset-detail { display: none; } }
     @media (pointer: coarse) { .workspace .close-button, .workspace .workspace-nav select { min-height: 44px; } .workspace .workspace-nav select { font-size: 1rem; } }
-    @media (max-width: 520px) { body { padding: 6px; } .card { padding: 16px; border-radius: 18px; } header { gap: 10px; } li, .content-button { align-items: flex-start; } .meta { max-width: 42%; } .statistics { grid-template-columns: 1fr; } }
+    @media (max-width: 520px) { body { padding: 6px; } .card { padding: 16px; border-radius: 18px; } header { flex-wrap: wrap; gap: 10px; } li, .content-button { align-items: flex-start; } .meta { max-width: 42%; } .statistics { grid-template-columns: 1fr; } }
     .upload-panel { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
     .upload-panel .caveat { flex-basis: 100%; margin: 0; }
     [hidden] { display: none !important; }
@@ -191,6 +192,7 @@ const HTML = `<!doctype html>
       <div class="header-actions">
         <button id="manage-connections" class="close-button" type="button" hidden>Manage connections</button>
         <span id="badge" class="badge">Waiting</span>
+        <button id="collapse-card" class="close-button" type="button" aria-controls="galaxy-card" aria-expanded="true">Collapse</button>
       </div>
     </header>
     <a id="management-link" class="close-button" target="_blank" rel="noopener noreferrer" hidden>Open connection manager ↗</a>
@@ -257,6 +259,7 @@ const HTML = `<!doctype html>
     const workspaceSite = document.getElementById("workspace-site");
     const workspaceHistories = document.getElementById("workspace-histories");
     const card = document.getElementById("galaxy-card");
+    const collapseCard = document.getElementById("collapse-card");
     const fileListPanel = document.getElementById("file-list-panel");
     const workspaceFileList = document.getElementById("workspace-file-list");
     const workspaceHistoryTitle = document.getElementById("workspace-history-title");
@@ -1699,6 +1702,13 @@ const HTML = `<!doctype html>
       }
     }
     viewReconnect.addEventListener("click", initializeView);
+    collapseCard.addEventListener("click", () => {
+      const collapsed = card.dataset.collapsed !== "true";
+      card.dataset.collapsed = String(collapsed);
+      collapseCard.textContent = collapsed ? "Expand" : "Collapse";
+      collapseCard.setAttribute("aria-expanded", String(!collapsed));
+      sendSize();
+    });
     void initializeView();
   </script>
 </body>
