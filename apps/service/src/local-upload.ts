@@ -3,10 +3,10 @@ import { z } from "zod";
 
 import { createRequestGalaxyContext, instanceInput, requestFetch, sourceOutput, withGalaxy, type GalaxyConnection } from "./galaxy-connection.js";
 
-// A file on the user's computer never passes through this service. The service opens a
-// resumable upload on the Galaxy site with the user's key, the card sends the bytes to
-// that upload straight from the browser, and the service then asks Galaxy to turn the
-// finished upload into a dataset. Galaxy checks the key when an upload is created; the
+// A file never passes through this service. The service opens a resumable upload on the
+// Galaxy site with the user's key; the card (from the browser) or the assistant (from its own
+// code environment, for a file attached to the chat) sends the bytes straight to that upload,
+// and the service then asks Galaxy to turn the finished upload into a dataset. Galaxy checks the key when an upload is created; the
 // upload's address is what authorizes its chunks, so the key never reaches the browser.
 
 /** Galaxy's own web client uploads in chunks of this size. */
@@ -23,7 +23,7 @@ const startInput = z.object({
 const startOutput = z.object({
   success: z.boolean(),
   upload: z.object({
-    url: z.string().url().describe("Send the file here in order, as tus PATCH requests"),
+    url: z.string().url().describe("Send the file here in order, as tus PATCH requests: Tus-Resumable 1.0.0, Content-Type application/offset+octet-stream, Upload-Offset = bytes sent so far, at most chunk_bytes per request. No API key is needed."),
     session_id: z.string(),
     chunk_bytes: z.number().int(),
   }).optional(),
@@ -77,7 +77,7 @@ async function startFileUpload(args: z.infer<typeof startInput>, connection: Gal
   return result({
     success: true,
     upload: { url: upload.url, session_id: upload.sessionId, chunk_bytes: UPLOAD_CHUNK_BYTES },
-    message: "Upload started. The file goes from this browser straight to Galaxy.",
+    message: "Upload started. Send the file straight to Galaxy at upload.url, then call finish_file_upload.",
   });
 }
 
@@ -108,19 +108,20 @@ async function finishFileUpload(args: z.infer<typeof finishInput>, connection: G
 }
 
 export function registerLocalUpload(server: McpServer, connections: GalaxyConnection[]) {
-  // The assistant cannot send file bytes, so only the card's Upload button uses these.
+  // The card's Upload button uses these, and so can the assistant when its own code environment
+  // can reach the Galaxy site: it then sends a chat attachment's bytes straight to Galaxy.
   const shared = {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    _meta: { ui: { visibility: ["app"] } },
+    _meta: { ui: { visibility: ["model", "app"] } },
   };
   server.registerTool("start_file_upload", {
     ...shared,
-    description: "Used by the Galaxy card's Upload button: open a resumable upload on the Galaxy site for a file the user chose. The card sends the bytes from the browser straight to Galaxy; they do not pass through this service or the assistant.",
+    description: "Open a resumable upload on the Galaxy site for one file. Use it for a file attached to the chat only when you can run code that reaches the Galaxy site: send the bytes from your code environment to upload.url with tus PATCH requests (no API key; the address authorizes them), then call finish_file_upload. The bytes never pass through this service or your context. If your code cannot reach the site, ask the user to use the history card's Upload button instead. The Galaxy card's Upload button also uses this tool.",
     inputSchema: startInput.extend(instanceInput), outputSchema: startOutput.extend(sourceOutput),
   }, ({ instance, ...args }, ctx) => withGalaxy(instance, connections, connection => startFileUpload(args, connection, ctx.mcpReq.signal)));
   server.registerTool("finish_file_upload", {
     ...shared,
-    description: "Used by the Galaxy card's Upload button: once the browser has sent the whole file, add it to the history as a dataset. Galaxy detects the format. An incomplete upload creates nothing.",
+    description: "After the whole file has reached upload.url, add it to the history as a dataset. Galaxy detects the format. An incomplete upload creates nothing; it reports how many bytes Galaxy has.",
     inputSchema: finishInput.extend(instanceInput), outputSchema: finishOutput.extend(sourceOutput),
   }, ({ instance, ...args }, ctx) => withGalaxy(instance, connections, connection => finishFileUpload(args, connection, ctx.mcpReq.signal)));
 }

@@ -41,7 +41,7 @@ describe("uploading a local file straight to Galaxy", () => {
       success: true, galaxy,
       // The upload server named itself with http behind Galaxy's proxy.
       upload: { url: "https://galaxy.example.test/api/upload/resumable_upload/0123456789abcdef", session_id: "0123456789abcdef", chunk_bytes: 10 * 1024 * 1024 },
-      message: "Upload started. The file goes from this browser straight to Galaxy.",
+      message: "Upload started. Send the file straight to Galaxy at upload.url, then call finish_file_upload.",
     });
     expect(JSON.stringify(start)).not.toContain(apiKey);
     expect(Object.fromEntries(requests[0]!.headers)).toMatchObject({

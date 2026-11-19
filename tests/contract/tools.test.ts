@@ -163,10 +163,10 @@ describe("Galaxy tool contract", () => {
         required: ["dataset_id", "name", "extension", "text", "characters_returned", "truncated"],
       },
     });
-    // Only the card can send a local file, so the model never sees the upload pair.
+    // The card and the assistant (sending a chat attachment from its own code) both use the upload pair.
     for (const name of ["start_file_upload", "finish_file_upload"]) {
       expect(tools.find(tool => tool.name === name)).toMatchObject({
-        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, _meta: { ui: { visibility: ["app"] } },
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, _meta: { ui: { visibility: ["model", "app"] } },
       });
     }
     expect(tools.find(({ name }) => name === "get_dataset_html")).toMatchObject({
