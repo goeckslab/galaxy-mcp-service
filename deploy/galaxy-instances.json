@@ -4,5 +4,6 @@
   "au": "https://usegalaxy.org.au",
   "fr": "https://usegalaxy.fr",
   "ca": "https://usegalaxy.ca",
-  "test": "https://test.galaxyproject.org"
+  "test": "https://test.galaxyproject.org",
+  "cfde": "https://galaxy.cfdeworkspace.org"
 }

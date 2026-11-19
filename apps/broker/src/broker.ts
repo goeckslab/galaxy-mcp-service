@@ -220,6 +220,7 @@ export async function createBroker(config: BrokerConfig) {
   const knownSites: Record<string, string> = {
     "https://usegalaxy.org": "Galaxy US", "https://usegalaxy.eu": "Galaxy Europe", "https://usegalaxy.org.au": "Galaxy Australia",
     "https://usegalaxy.fr": "Galaxy France", "https://usegalaxy.ca": "Galaxy Canada", "https://test.galaxyproject.org": "Galaxy test server",
+    "https://galaxy.cfdeworkspace.org": "Galaxy CFDE",
   };
   const siteName = (name: string) => knownSites[instances.get(name) ?? ""] ?? name;
   /**
