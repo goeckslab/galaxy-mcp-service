@@ -560,7 +560,7 @@ describe("history result browser", () => {
 
     it("sends the bytes in order straight to Galaxy without credentials, then adds the file and reloads the history", async () => {
       const sent: Array<Record<string, unknown>> = [];
-      const ui = mount(history, { reply: reply(), fetch: async (url, init) => {
+      const ui = mount(history, { reply: reply(), initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } }, fetch: async (url, init) => {
         sent.push({ url, method: init.method, offset: init.headers["Upload-Offset"], bytes: init.body.bytes, credentials: init.credentials, type: init.headers["Content-Type"] });
         // The second reply reports its offset; the others leave the card to count.
         return { status: 204, ok: true, headers: { get: () => sent.length === 2 ? "20" : null } };
@@ -579,6 +579,10 @@ describe("history result browser", () => {
       expect(ui.node("upload-note").textContent).toContain("counts.tsv is in Galaxy");
       expect(ui.node("upload-note").hidden).toBe(false);
       expect(ui.node("histories").children).toHaveLength(2);
+      // The model learns which file the person just uploaded, for "run X on the file I uploaded".
+      expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({
+        view: "history_contents", history_id: "h1", last_upload: { file_name: "counts.tsv", dataset_id: "d9", history_id: "h1" },
+      });
       expect(ui.node("upload-button").disabled).toBe(false);
       expect(ui.node("upload-cancel").hidden).toBe(true);
       expect(JSON.stringify(ui.calls)).not.toMatch(/api.?key|password|token/i);

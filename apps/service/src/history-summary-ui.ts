@@ -322,6 +322,8 @@ const HTML = `<!doctype html>
     let sourceViewId;
     let sourceGalaxy;
     let uploadAbort;
+    // The last file the person uploaded here, so a later "use the file I just uploaded" can be resolved.
+    let lastUpload;
     let uploadNoteHistory;
     let viewContext;
     let lastSentContext;
@@ -492,7 +494,10 @@ const HTML = `<!doctype html>
         const finished = await request("tools/call", { name: "finish_file_upload", arguments: { ...target, sessionId: string(upload.session_id) } });
         if (finished?.isError || finished?.structuredContent?.success !== true) throw new Error(string(finished?.structuredContent?.message) || "Galaxy did not add the file.");
         uploadStatus(name + " is in Galaxy, which is now processing it. Tell the assistant when you want to use it.");
+        lastUpload = { file_name: name, dataset_id: string(finished.structuredContent.data?.outputs?.[0]?.id) || null, history_id: string(history.id),
+          uploaded_at: new Date().toISOString(), note: "Uploaded by the user with this card; Galaxy may still be processing it." };
         if (currentHistory === history && datasetDetail.hidden && !closed) void openHistory(history);
+        else if (viewContext) publishView(viewContext);
       } catch (error) {
         // One sentence, whether or not the reason came with its own full stop.
         const reason = fallback => (string(error?.message).replace(/[.\\s]+$/, "") || fallback) + ".";
@@ -576,7 +581,7 @@ const HTML = `<!doctype html>
     });
 
     function publishView(value) {
-      viewContext = { ...value, ...(sourceGalaxy && { galaxy: sourceGalaxy }), view_id: sourceViewId || null, display_verified: false,
+      viewContext = { ...value, ...(sourceGalaxy && { galaxy: sourceGalaxy }), ...(lastUpload && { last_upload: lastUpload }), view_id: sourceViewId || null, display_verified: false,
         surface: workspaceConnections ? "workspace" : "card",
         scope: workspaceConnections ? "This open Galaxy panel only. Prefer its controls; do not create a card for each lookup. Content loading does not verify visible display."
           : "This card only, not other tool calls or the user's workspace. Content loading does not verify visible display." };
