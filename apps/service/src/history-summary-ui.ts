@@ -91,6 +91,8 @@ const HTML = `<!doctype html>
     .close-button:hover:not(:disabled) { background: var(--hover); }
     .close-button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .close-button:disabled { color: var(--secondary); background: var(--row); cursor: default; }
+    #detail-close { display: block; margin-top: 14px; }
+    #detail-close[hidden] { display: none; }
     #history-link, #report-link, #management-link { display: inline-flex; align-items: center; margin-top: 14px; text-decoration: none; }
     #history-link:hover, #report-link:hover, #management-link:hover { text-decoration: underline; }
     .run-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
@@ -195,6 +197,7 @@ const HTML = `<!doctype html>
         <button id="collapse-card" class="close-button" type="button" aria-controls="galaxy-card" aria-expanded="true">Collapse</button>
       </div>
     </header>
+    <button id="detail-close" class="close-button" type="button" hidden>‹ All datasets</button>
     <a id="management-link" class="close-button" target="_blank" rel="noopener noreferrer" hidden>Open connection manager ↗</a>
     <p id="management-note" class="caveat" role="status" aria-live="polite" hidden></p>
     <nav id="workspace-nav" class="workspace-nav" aria-label="Galaxy workspace" hidden>
@@ -239,7 +242,6 @@ const HTML = `<!doctype html>
           <h2 id="detail-title">Dataset contents</h2>
           <p id="detail-message" class="detail" role="status" aria-live="polite"></p>
         </div>
-        <button id="detail-close" class="close-button" type="button">‹ Results</button>
       </div>
       <a id="report-link" class="close-button" target="_blank" rel="noopener noreferrer" title="Open the original report in Galaxy (new tab)" hidden>Open original in Galaxy ↗</a>
       <p id="report-link-note" class="caveat" role="status" hidden></p>
@@ -670,6 +672,7 @@ const HTML = `<!doctype html>
       fileListPanel.hidden = !listVisible || histories.childElementCount === 0;
       histories.hidden = fileListPanel.hidden;
       message.hidden = detailOpen;
+      detailClose.hidden = !detailOpen;
       showMore.hidden = !listVisible || !canShowMore;
       showLess.hidden = !listVisible || histories.childElementCount <= CONTENT_PAGE_SIZE;
       workspaceFileList.hidden = !workspaceConnections || !detailOpen || !currentContents;
@@ -1484,9 +1487,9 @@ const HTML = `<!doctype html>
         }
       } catch {
         if (requestId !== detailRequestId) return;
-        detailMessage.textContent = expectedHash ? "The requested page could not be confirmed. The last loaded preview is retained. Return to Results to reload."
+        detailMessage.textContent = expectedHash ? "The requested page could not be confirmed. The last loaded preview is retained. Go back to All datasets to reload."
           : contentRejected ? "Full-file preview is unavailable; dataset details and the original Galaxy link remain available."
-          : "This report could not be loaded as a full preview. Dataset details and original file remain available. Return to Results to try again.";
+          : "This report could not be loaded as a full preview. Dataset details and original file remain available. Go back to All datasets to try again.";
         publishView({ ...reportContext, report_status: "load_failed", display_verified: false });
         if (!expectedHash) {
           renderDatasetSummary(value);
