@@ -21,6 +21,11 @@ export interface BrokerConfig {
   instances: Record<string, string>;
   /** Sites whose users can sign in through the site's login provider instead of pasting an API key. */
   galaxyLogins?: Record<string, GalaxyLoginConfig>;
+  /**
+   * Sites left off every list, added by typing their address, and only for the listed Galaxy accounts.
+   * Keyed by instance name; the emails are those of the accounts on that site.
+   */
+  hiddenSites?: Record<string, { name: string; emails: string[] }>;
   allowLoopback?: boolean;
   trustProxy?: boolean;
 }
@@ -137,6 +142,7 @@ const formStyle = [
   ".key input{width:100%;height:36px;padding:0 12px;border:1px solid var(--strong);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}.key input:focus{outline:2px solid var(--fg);outline-offset:1px}",
   ".help{display:inline-block;margin-top:4px;font-size:13px;color:var(--muted)}.hint{margin:0;font-size:13px;color:var(--muted)}.status{font-size:13px;color:var(--muted)}",
   "label.consent{display:flex;gap:8px;align-items:flex-start;margin:16px 0 8px}label.consent input{margin-top:4px}",
+  "details.other{padding:12px 16px;border:1px dashed var(--border);border-radius:8px}details.other summary{cursor:pointer;color:var(--muted)}details.other .details{margin-left:0}",
   "details.more{margin-top:24px;font-size:13px;color:var(--muted)}details.more summary{cursor:pointer;color:var(--fg)}details.more p{margin:8px 0 0}",
   "@media(max-width:520px){.host{width:100%;margin-left:28px;text-align:left}.fixed .host{margin-left:0}.details{margin-left:0}}",
   // Without :has() every site stays open, which still works.
@@ -210,6 +216,14 @@ export async function createBroker(config: BrokerConfig) {
   }));
   if (!instances.size) throw new Error("Configure at least one approved Galaxy instance.");
   const logins = createGalaxyLogins(config.galaxyLogins ?? {}, instances, { allowLoopback: config.allowLoopback === true });
+  const hidden = new Map(Object.entries(config.hiddenSites ?? {}).map(([name, site]) => {
+    if (!instances.has(name) || logins.has(name) || !site?.name || !Array.isArray(site.emails) || !site.emails.length) {
+      throw new Error("Invalid hidden Galaxy site.");
+    }
+    return [name, { name: site.name, emails: new Set(site.emails.map(email => String(email).trim().toLowerCase())) }];
+  }));
+  /** The sites offered by name; hidden ones are added by address. */
+  const listed = [...instances.keys()].filter(name => !hidden.has(name));
   // Under /interaction/, which the proxy already sends to the broker.
   const loginCallback = `${issuer.origin}/interaction/keycloak/callback`;
   const store = await createStore(config.databaseUrl, config.encryptionKey, logins.refresh);
@@ -223,13 +237,13 @@ export async function createBroker(config: BrokerConfig) {
     "https://usegalaxy.fr": "Galaxy France", "https://usegalaxy.ca": "Galaxy Canada", "https://test.galaxyproject.org": "Galaxy test server",
     "https://galaxy.cfdeworkspace.org": "Galaxy CFDE",
   };
-  const siteName = (name: string) => knownSites[instances.get(name) ?? ""] ?? name;
+  const siteName = (name: string) => hidden.get(name)?.name ?? knownSites[instances.get(name) ?? ""] ?? name;
   /**
    * One card per site. Ticking a site opens its card: sites with sign-in offer it first and keep the API key
    * as the other choice; other sites ask for the key with a link to where Galaxy shows it. `fixed` changes one
    * site that is already chosen, so it has no tick box.
    */
-  const siteFields = (names: string[], { status = new Map<string, string>(), fixed = false } = {}) => `<div class="sites">${names.map(name => {
+  const siteFields = (names: string[], { status = new Map<string, string>(), fixed = false, other = false } = {}) => `<div class="sites">${names.map(name => {
     const url = instances.get(name)!;
     const host = escape(new URL(url).host);
     const label = escape(siteName(name));
@@ -245,9 +259,11 @@ export async function createBroker(config: BrokerConfig) {
       ? `<input type="hidden" name="site.${escape(name)}" value="yes"><div class="pick">${heading}</div>`
       : `<label class="pick"><input type="checkbox" name="site.${escape(name)}" value="yes">${heading}</label>`;
     return `<div class="site${fixed ? " fixed" : ""}">${pick}<div class="details">${choice}</div></div>`;
-  }).join("")}</div>`;
+  }).join("")}${other && hidden.size ? `<details class="other"><summary>Using another Galaxy site?</summary><div class="details key">
+      <input name="other_site" type="text" autocomplete="off" maxlength="255" placeholder="Its address, for example galaxy.example.org" aria-label="Galaxy site address">
+      <input name="other_key" type="password" autocomplete="off" maxlength="4096" placeholder="Paste your API key for that site" aria-label="API key for that site"></div></details>` : ""}</div>`;
   /** Fields a site form may send for each enabled site. */
-  const siteFormFields = [...instances.keys()].flatMap(name => [`site.${name}`, `method.${name}`, `api_key.${name}`]);
+  const siteFormFields = [...instances.keys()].flatMap(name => [`site.${name}`, `method.${name}`, `api_key.${name}`]).concat("other_site", "other_key");
   /**
    * The ticked sites of a site form, each by API key or sign-in, limited to the sites it offered.
    * A key typed into a site that was then unticked is ignored.
@@ -266,6 +282,23 @@ export async function createBroker(config: BrokerConfig) {
       if (method !== "key" || apiKey.length > 4096 || /[\r\n]/.test(apiKey)) throw new errors.InvalidRequest("Invalid connection.");
       if (!apiKey) throw new ConnectionProblem(`Paste your API key for ${siteName(instance)}, or untick it.`, "API key missing");
       apiKeys.push({ instance, apiKey, baseUrl: instances.get(instance)! });
+    }
+    const address = (form.get("other_site") ?? "").trim();
+    if (address) {
+      let site = "";
+      try {
+        const url = new URL(/^https?:\/\//i.test(address) ? address : `https://${address}`);
+        site = `${url.origin}${url.pathname.replace(/\/$/, "")}`;
+      } catch { /* not an address */ }
+      const instance = [...hidden.keys()].find(name => instances.get(name) === site);
+      if (!instance || !offered.has(instance)) {
+        throw new ConnectionProblem(`${address} is not one of the Galaxy sites this service connects to.`, "Site not available",
+          { href: new URL("/support#request-site", resource).href, text: "Request a site" });
+      }
+      const apiKey = (form.get("other_key") ?? "").trim();
+      if (apiKey.length > 4096 || /[\r\n]/.test(apiKey)) throw new errors.InvalidRequest("Invalid connection.");
+      if (!apiKey) throw new ConnectionProblem(`Paste your API key for ${address}.`, "API key missing");
+      if (!apiKeys.some(value => value.instance === instance)) apiKeys.push({ instance, apiKey, baseUrl: instances.get(instance)! });
     }
     return { apiKeys, signIns };
   };
@@ -446,7 +479,7 @@ export async function createBroker(config: BrokerConfig) {
         + `<main><h1>${escape(text)}</h1><p>This should take a moment. If nothing happens, continue here.</p><a class="button" href="${escape(target)}">Continue</a></main></html>`;
     };
     /** Galaxy's own account id for a key or a sign-in's access token. */
-    const galaxyUser = async (baseUrl: string, headers: Record<string, string>) => {
+    const galaxyUser = async (baseUrl: string, headers: Record<string, string>, instance?: string) => {
       const response = await fetch(`${baseUrl}/api/users/current`, {
         headers: { ...headers, accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(10000),
       });
@@ -470,8 +503,12 @@ export async function createBroker(config: BrokerConfig) {
         const host = new URL(baseUrl).host;
         throw new ConnectionProblem(`${host} did not accept this API key. Copy your key again from User → Preferences → Manage API Key on ${host}; keys from another Galaxy site do not work here.`, "API key not accepted");
       }
-      const user = JSON.parse(await identityBody(response)) as { id?: unknown; deleted?: unknown; is_anonymous?: unknown };
+      const user = JSON.parse(await identityBody(response)) as { id?: unknown; deleted?: unknown; is_anonymous?: unknown; email?: unknown };
       if (typeof user.id !== "string" || !user.id || user.deleted || user.is_anonymous) throw new errors.InvalidRequest("Galaxy identity could not be verified.");
+      const invited = instance === undefined ? undefined : hidden.get(instance)?.emails;
+      if (invited && !(typeof user.email === "string" && invited.has(user.email.trim().toLowerCase()))) {
+        throw new ConnectionProblem(`${new URL(baseUrl).host} is open to invited accounts only, and this API key's account is not one of them. Nothing was saved.`, "Account not invited");
+      }
       return user.id;
     };
     /** Sends the browser to the next site's login provider, keeping the connection in progress for ten minutes. */
@@ -548,10 +585,11 @@ export async function createBroker(config: BrokerConfig) {
       const credential = await store.managedCredential(target.accountId, target.sourceGrant);
       if (!credential || credential.grantId !== target.targetGrant) throw new errors.InvalidRequest("Connection is no longer available.");
       const connected = new Map(credential.connections.map(value => [value.instance, value]));
-      const names = instance ? [instance] : [...instances.keys()].filter(name => !connected.has(name));
-      if (!names.length || (instance && (!connected.has(instance) || !instances.has(instance)))) throw new errors.InvalidRequest("Nothing to change.");
+      const names = instance ? [instance] : listed.filter(name => !connected.has(name));
+      const offered = instance ? names : [...names, ...[...hidden.keys()].filter(name => !connected.has(name))];
+      if (!offered.length || (instance && (!connected.has(instance) || !instances.has(instance)))) throw new errors.InvalidRequest("Nothing to change.");
       const status = new Map(names.flatMap(name => connected.has(name) ? [[name, `Now: ${methodLabel(connected.get(name)!)}`] as const] : []));
-      const save = await actionToken({ ...target, operation: "save", sites: names.join(" "), ...(instance ? { instance } : {}) });
+      const save = await actionToken({ ...target, operation: "save", sites: offered.join(" "), ...(instance ? { instance } : {}) });
       const back = await actionToken({ ...target, operation: "view" });
       const client = clientLabelFor(credential.clientId);
       const title = instance ? `Change ${siteName(instance)}` : "Add a Galaxy site";
@@ -563,7 +601,7 @@ export async function createBroker(config: BrokerConfig) {
       ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)}</title>
         <style>${cardStyle}${formStyle}</style>
         <main><h1>${escape(title)}</h1><p>${escape(intro)}</p>
-        <form method="post" action="/connections/save"><input type="hidden" name="action_token" value="${save}">${siteFields(names, { status, fixed: instance !== undefined })}
+        <form method="post" action="/connections/save"><input type="hidden" name="action_token" value="${save}">${siteFields(names, { status, fixed: instance !== undefined, other: instance === undefined })}
         <label class="consent"><input type="checkbox" name="consent" value="yes" required>I allow ${escape(client)} to read my Galaxy data and run analyses on ${instance ? "this site" : "the sites I ticked"}.</label>
         <button>Save</button></form>
         <form method="post" action="/connections/action"><input type="hidden" name="action_token" value="${back}"><button class="secondary">Back to Manage connections</button></form>
@@ -674,7 +712,7 @@ export async function createBroker(config: BrokerConfig) {
         }
         // Verify every key before signing in or saving anything.
         const users = Object.fromEntries(await Promise.all(apiKeys.map(async ({ instance: name, baseUrl, apiKey }) =>
-          [name, await galaxyUser(baseUrl, { "x-api-key": apiKey })])));
+          [name, await galaxyUser(baseUrl, { "x-api-key": apiKey }, name)])));
         if (signIns.length) await signInNext({ uid: "", manage: target, apiKeys, signedIn: [], users, remaining: signIns });
         else await applyChanges(target, apiKeys);
       } catch (error) {
@@ -799,7 +837,7 @@ export async function createBroker(config: BrokerConfig) {
           ctx.body = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect Galaxy</title>
             <style>${cardStyle}${formStyle}</style>
             <main><h1>Connect Galaxy</h1><p><strong>${client}</strong> wants to read your Galaxy data and run analyses for you. Tick the Galaxy sites to connect.</p>
-            <form method="post" action="/interaction/${escape(details.uid)}"><input type="hidden" name="csrf" value="${csrf}">${siteFields([...instances.keys()])}
+            <form method="post" action="/interaction/${escape(details.uid)}"><input type="hidden" name="csrf" value="${csrf}">${siteFields(listed, { other: true })}
             <label class="consent"><input type="checkbox" name="consent" value="yes" required>I allow ${client} to read my Galaxy data and run analyses on the sites I ticked.</label>
             <button name="action" value="connect">Connect Galaxy</button><button name="action" value="cancel" formnovalidate>Cancel</button></form>
             <p class="small">Afterwards you return to <strong>${loopback ? `${client} on this computer (${escape(callbackHost)})` : escape(callbackHost)}</strong>. Keys and sign-ins are encrypted and shared only with the Galaxy MCP service, never with ${client}.</p>
@@ -828,7 +866,7 @@ export async function createBroker(config: BrokerConfig) {
         if (sites > MAX_CONNECTIONS) throw new errors.InvalidRequest("Invalid connection.");
         // Verify every key before creating any grant or signing in; a failed site never yields partial consent.
         const users = Object.fromEntries(await Promise.all(apiKeys.map(async ({ instance, baseUrl, apiKey }) =>
-          [instance, await galaxyUser(baseUrl, { "x-api-key": apiKey })])));
+          [instance, await galaxyUser(baseUrl, { "x-api-key": apiKey }, instance)])));
         if (signIns.length) await signInNext({ uid: details.uid, apiKeys, signedIn: [], users, remaining: signIns });
         else await complete(apiKeys, users);
       } catch (error) {

@@ -23,6 +23,7 @@ Install workspace dependencies and build with `pnpm install --frozen-lockfile` a
 | `BROKER_RESOURCE_CLIENT_SECRET` | A strong secret of at least 32 characters for that resource client. |
 | `GALAXY_INSTANCES_JSON` | JSON object mapping approved instance names to canonical HTTPS Galaxy base URLs. Use the same mapping on the MCP service. |
 | `BROKER_GALAXY_LOGINS_JSON` | Optional. JSON object of sites whose users can sign in instead of pasting an API key; see [Galaxy sign-in](#galaxy-sign-in). |
+| `BROKER_HIDDEN_SITES_JSON` | Optional. JSON object of invite-only sites, keyed by instance name: `{"name": "…", "emails": ["…"]}`. These sites appear on no list; a person adds one by typing its address, and its key is accepted only for an account whose Galaxy email is listed. Keep the list in the server environment, not in the repository. |
 
 Generate production secrets using the deployment's secret-management process. Do not put them in source control, build arguments, shell history, screenshots or logs. Do not generate new encryption, cookie or signing keys on each process start. Changing the encryption key makes existing state inaccessible; this implementation does not provide online encryption-key migration. Keep compatible signing and cookie key history when rotating those keys.
 

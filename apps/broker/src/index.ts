@@ -24,6 +24,7 @@ try {
     resourceClientSecret: required("BROKER_RESOURCE_CLIENT_SECRET"),
     instances: JSON.parse(required("GALAXY_INSTANCES_JSON")),
     galaxyLogins: parseGalaxyLogins(process.env.BROKER_GALAXY_LOGINS_JSON),
+    hiddenSites: process.env.BROKER_HIDDEN_SITES_JSON ? JSON.parse(process.env.BROKER_HIDDEN_SITES_JSON) : undefined,
     allowLoopback: process.env.BROKER_ALLOW_LOOPBACK === "1",
     trustProxy: process.env.BROKER_TRUST_PROXY === "1",
   });

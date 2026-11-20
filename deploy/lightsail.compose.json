@@ -73,7 +73,8 @@
         "BROKER_RESOURCE_CLIENT_ID": "galaxy-mcp-resource-server",
         "BROKER_RESOURCE_CLIENT_SECRET": "${BROKER_RESOURCE_CLIENT_SECRET:?Set the persistent resource-client secret}",
         "GALAXY_INSTANCES_JSON": "${GALAXY_INSTANCES_JSON:?Set the approved Galaxy instance map}",
-        "BROKER_GALAXY_LOGINS_JSON": "${BROKER_GALAXY_LOGINS_JSON:-}"
+        "BROKER_GALAXY_LOGINS_JSON": "${BROKER_GALAXY_LOGINS_JSON:-}",
+        "BROKER_HIDDEN_SITES_JSON": "${BROKER_HIDDEN_SITES_JSON:-}"
       },
       "depends_on": { "postgres": { "condition": "service_healthy" } },
       "networks": ["app", "database"],

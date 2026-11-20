@@ -242,7 +242,7 @@ beforeAll(async () => {
     apiRequests.push(`${req.method} ${path} ${req.headers["x-api-key"]}`);
     res.setHeader("content-type", "application/json");
     if (req.method !== "GET" || req.headers["x-api-key"] !== keys[instance]) { res.writeHead(401).end("{}"); return; }
-    if (path.endsWith("/api/users/current")) res.end(JSON.stringify({ id: "same-id-on-two-instances", deleted: false }));
+    if (path.endsWith("/api/users/current")) res.end(JSON.stringify({ id: "same-id-on-two-instances", email: `${instance}-user@example.org`, deleted: false }));
     else if (path.endsWith("/api/histories")) res.end(JSON.stringify([{ id: `history-${instance}`, name: `Private ${instance} history`, state: "ok" }]));
     else if (path.endsWith("/api/invocations/run-1/jobs_summary")) res.end(JSON.stringify({ states: { ok: 1 }, populated_state: "ok" }));
     else if (path.endsWith("/api/invocations/run-1")) res.end(JSON.stringify({ id: "run-1", state: "scheduled", history_id: `history-${instance}` }));
@@ -476,6 +476,41 @@ describe("durable Galaxy credential broker", () => {
       expect(html).not.toContain('api_key.main');
       expect(html).toContain('name="api_key.eu"');
       expect(apiRequests).toHaveLength(before);
+    } finally {
+      await broker.close();
+      broker = await createBroker(config);
+      handler = broker.callback;
+    }
+  });
+
+  it("offers an invite-only site by address alone and connects it only for a listed Galaxy account", async () => {
+    const invited = (emails: string[]) => ({ ...config, hiddenSites: { eu: { name: "Galaxy Invited", emails } } });
+    await broker.close();
+    broker = await createBroker(invited(["EU-User@example.org"]));
+    handler = broker.callback;
+    try {
+      const { html } = await authorization();
+      expect(html).not.toContain("api_key.eu");
+      expect(html).not.toContain("Galaxy Invited");
+      expect(html).toContain('name="other_site"');
+      const response = await exchange(await codeFor("us", "client-a", undefined, {},
+        { "api_key.us": keys.us, other_site: `${config.instances.eu}/`, other_key: keys.eu }));
+      expect(response.status).toBe(200);
+      const issued = await response.json() as Tokens;
+      expect((await (await introspect(issued.access_token)).json()).galaxy_connections).toEqual(expect.arrayContaining([
+        expect.objectContaining({ instance: "eu", api_key: keys.eu }), expect.objectContaining({ instance: "us" })]));
+      const unknown = await consent(await authorization(), "us", { other_site: "galaxy.example.org", other_key: "fixture-unknown-key" });
+      expect(unknown.status).toBe(400);
+      expect(await unknown.text()).toContain("galaxy.example.org is not one of the Galaxy sites this service connects to.");
+
+      await broker.close();
+      broker = await createBroker(invited(["someone-else@example.org"]));
+      handler = broker.callback;
+      const before = (await database.query("SELECT count(*)::int AS n FROM galaxy_broker_credentials")).rows[0].n;
+      const refused = await consent(await authorization(), "us", { other_site: config.instances.eu!, other_key: keys.eu });
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain("is open to invited accounts only");
+      expect((await database.query("SELECT count(*)::int AS n FROM galaxy_broker_credentials")).rows[0].n).toBe(before);
     } finally {
       await broker.close();
       broker = await createBroker(config);
