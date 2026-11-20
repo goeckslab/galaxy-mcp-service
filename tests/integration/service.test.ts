@@ -369,6 +369,7 @@ describe("HTTP MCP service", () => {
       "create_collection",
       "start_file_upload",
       "finish_file_upload",
+      "wait_for_datasets",
     ]);
     const unconfigured = await client.callTool({ name: "search_tools_by_name", arguments: { query: "fastqc" } });
     expect(unconfigured.structuredContent).toMatchObject({ success: false, errorKind: "connection" });

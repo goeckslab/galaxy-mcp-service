@@ -20,6 +20,7 @@ import { readRunStatus } from "./run-status.js";
 import { registerReportReader } from "./report-reader.js";
 import { registerCollections } from "./collections.js";
 import { registerLocalUpload } from "./local-upload.js";
+import { registerWaitForDatasets } from "./wait-datasets.js";
 import { historyPurposeInput, recordHistoryPurpose, recordRunPurpose, runPurposeInput } from "./run-purpose.js";
 import { registerRunEvents } from "./events.js";
 import type { EventRequest } from "@galaxy-mcp-service/protocol";
@@ -853,6 +854,7 @@ export function createGalaxyMcpHandler(
       registerReportReader(server, connections);
       registerCollections(server, connections);
       registerLocalUpload(server, connections);
+      registerWaitForDatasets(server, connections);
       if (authInfo !== undefined && eventRequest !== undefined && connections.length) registerRunEvents(server, authInfo, connections, eventRequest);
       return server;
     },

@@ -30,6 +30,7 @@ export const toolTitles: Readonly<Record<string, string>> = {
   recommend_iwc_workflows: "Recommend IWC workflows",
   search_iwc_workflows: "Search IWC workflows",
   search_tools_by_name: "Search Galaxy tools",
+  wait_for_datasets: "Wait for datasets",
   show_dataset: "Show dataset report",
   show_galaxy: "Open Galaxy workspace",
   show_histories: "Show Galaxy histories",

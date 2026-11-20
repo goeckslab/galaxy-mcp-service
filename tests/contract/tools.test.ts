@@ -62,6 +62,7 @@ describe("Galaxy tool contract", () => {
       "create_collection",
       "start_file_upload",
       "finish_file_upload",
+      "wait_for_datasets",
     ]);
     expect(tools.map(({ name }) => name)).not.toContain("read_probe");
     for (const tool of tools) {
