@@ -286,9 +286,10 @@ describe("durable Galaxy credential broker", () => {
     ["galaxy-gemini-cli", ["http://localhost:43116/oauth/callback", "http://localhost:43117/oauth/callback"]],
     ["galaxy-grok-build", ["http://localhost:3120/callback", "http://127.0.0.1:43118/callback"]],
     ["https://grok.com/oauth/mcp-client.json", ["https://grok.com/connectors-oauth-exchange-code/", "https://console.x.ai/connectors-oauth-exchange-code/"]],
+    ["https://antigravity.google/oauth/client-metadata.json", ["https://antigravity.google/oauth-callback"]],
   ] as const)("authorizes the curated %s profile with issuer-bound callbacks, PKCE and isolated rotating refresh", async (clientId, callbacks) => {
     const client = await broker.provider.Client.find(clientId);
-    expect(client?.applicationType).toBe(clientId === "https://grok.com/oauth/mcp-client.json" ? "web" : "native");
+    expect(client?.applicationType).toBe(clientId.startsWith("https://grok.com/") || clientId.startsWith("https://antigravity.google/") ? "web" : "native");
     for (const redirect of ["https://attacker.example/callback", "http://localhost.attacker.example/callback",
       "http://127.0.0.2/callback", "http://localhost/callback/extra", "http://localhost/oauth/callback?next=evil",
       "https://grok.com/connectors-oauth-exchange-code", "https://grok.com:444/connectors-oauth-exchange-code/",

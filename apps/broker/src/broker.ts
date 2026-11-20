@@ -69,7 +69,8 @@ const publicClients: ClientMetadata[] = [
   { client_id: "galaxy-grok-build", client_name: "Grok Build", application_type: "native",
     redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"], token_endpoint_auth_method: "none" },
   { client_id: "https://grok.com/oauth/mcp-client.json", client_name: "Grok", application_type: "web",
-    redirect_uris: ["https://grok.com/connectors-oauth-exchange-code/", "https://console.x.ai/connectors-oauth-exchange-code/"], token_endpoint_auth_method: "none" },
+    redirect_uris: ["https://grok.com/connectors-oauth-exchange-code/", "https://console.x.ai/connectors-oauth-exchange-code/"], token_endpoint_auth_method: "none" },  { client_id: "https://antigravity.google/oauth/client-metadata.json", client_name: "Google Antigravity", application_type: "web",
+    redirect_uris: ["https://antigravity.google/oauth-callback"], token_endpoint_auth_method: "none" },
 ];
 
 function sameSecret(actual: string, expected: string): boolean {
