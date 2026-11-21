@@ -493,6 +493,8 @@ describe("durable Galaxy credential broker", () => {
       expect(html).not.toContain("api_key.eu");
       expect(html).not.toContain("Galaxy Invited");
       expect(html).toContain('name="other_site"');
+      expect(html).toContain("Invited to another Galaxy site?");
+      expect(html).toContain("For Galaxy sites shared with you by invitation.");
       const response = await exchange(await codeFor("us", "client-a", undefined, {},
         { "api_key.us": keys.us, other_site: `${config.instances.eu}/`, other_key: keys.eu }));
       expect(response.status).toBe(200);

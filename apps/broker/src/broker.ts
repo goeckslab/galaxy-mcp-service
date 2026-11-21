@@ -259,7 +259,8 @@ export async function createBroker(config: BrokerConfig) {
       ? `<input type="hidden" name="site.${escape(name)}" value="yes"><div class="pick">${heading}</div>`
       : `<label class="pick"><input type="checkbox" name="site.${escape(name)}" value="yes">${heading}</label>`;
     return `<div class="site${fixed ? " fixed" : ""}">${pick}<div class="details">${choice}</div></div>`;
-  }).join("")}${other && hidden.size ? `<details class="other"><summary>Using another Galaxy site?</summary><div class="details key">
+  }).join("")}${other && hidden.size ? `<details class="other"><summary>Invited to another Galaxy site?</summary><div class="details key">
+      <p class="hint">For Galaxy sites shared with you by invitation. Need a site that is not listed? <a href="${escape(new URL("/support#request-site", resource).href)}" target="_blank" rel="noopener noreferrer">Request it</a>.</p>
       <input name="other_site" type="text" autocomplete="off" maxlength="255" placeholder="Its address, for example galaxy.example.org" aria-label="Galaxy site address">
       <input name="other_key" type="password" autocomplete="off" maxlength="4096" placeholder="Paste your API key for that site" aria-label="API key for that site"></div></details>` : ""}</div>`;
   /** Fields a site form may send for each enabled site. */
