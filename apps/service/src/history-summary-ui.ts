@@ -632,6 +632,8 @@ const HTML = `<!doctype html>
       message.textContent = workspaceConnections.length ? "Choose a site to browse its histories and reports. Analyses stay on their original Galaxy site." : "Connect a Galaxy account in your client to begin.";
       badge.textContent = workspaceConnections.length ? "Connected" : "Not configured";
       badge.dataset.state = workspaceConnections.length ? "connected" : "neutral";
+      // The label says what state the card is in only when that is not the ordinary one.
+      badge.hidden = workspaceConnections.length > 0;
       publishView({ view: "workspace", authorized_sites: workspaceConnections, selected_site: selected || null });
       if (workspaceInitial) { const initial = workspaceInitial; workspaceInitial = undefined; render({ ...initial, ...(sourceViewId && { presentation: { view_id: sourceViewId } }) }, true); }
       sendSize();
@@ -724,6 +726,7 @@ const HTML = `<!doctype html>
       instance.hidden = false;
       badge.dataset.state = runUnconfirmed || state === "unknown" ? "unknown" : state === "completed" ? "connected" : state === "failed" ? "error" : state === "running" ? "running" : "neutral";
       badge.textContent = runUnconfirmed ? "Unconfirmed" : runStateLabels[state];
+      badge.hidden = false;
       message.textContent = string(currentRun.message) || runMessages[state];
       const checked = new Date(string(currentRun.checked_at));
       runChecked.textContent = Number.isNaN(checked.getTime()) ? "No confirmed status check yet." : "Last checked " + checked.toLocaleString();
@@ -801,6 +804,7 @@ const HTML = `<!doctype html>
       histories.setAttribute("aria-label", "Galaxy histories");
       badge.dataset.state = status;
       badge.textContent = labels[status];
+      badge.hidden = status === "connected";
       instance.textContent = sourceLabel() || string(data.instance);
       instance.hidden = !!workspaceConnections || !instance.textContent;
       message.textContent = string(data.message) || (status === "not_configured"
@@ -893,6 +897,7 @@ const HTML = `<!doctype html>
       histories.setAttribute("aria-label", "Galaxy history contents");
       badge.dataset.state = status;
       badge.textContent = success ? data.view === "dataset" ? "Report" : "Results" : labels[status];
+      badge.hidden = success;
       instance.textContent = sourceLabel() || "Galaxy results";
       instance.hidden = !!workspaceConnections;
       message.textContent = success
@@ -1697,6 +1702,7 @@ const HTML = `<!doctype html>
         } else {
           badge.dataset.state = "neutral";
           badge.textContent = "Waiting";
+          badge.hidden = false;
           message.textContent = "Waiting for Galaxy results…";
         }
         openSelectedDataset();
@@ -1709,6 +1715,7 @@ const HTML = `<!doctype html>
         } else {
           badge.dataset.state = "error";
           badge.textContent = "Unavailable";
+          badge.hidden = false;
           message.textContent = "The host did not initialize this Galaxy view. Existing results remain available; reconnect this view to try again.";
         }
       } finally {

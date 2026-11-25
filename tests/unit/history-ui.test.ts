@@ -158,6 +158,21 @@ const historyResult = { status: "connected", histories: [{ id: "private-history"
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("history result browser", () => {
+  it("shows its status label only when the status is not the ordinary one", async () => {
+    const ui = mount(undefined, { initializeResult: { hostCapabilities: { serverTools: {} } } });
+    await flush();
+    ui.notify({ status: "connected", histories: items(1, 2) });
+    expect(ui.node("badge").hidden).toBe(true);
+    ui.notify({ success: true, data: items(1, 2) });
+    expect(ui.node("badge").hidden).toBe(true);
+    ui.notify({ status: "error", histories: [] });
+    expect(ui.node("badge").hidden).toBe(false);
+    expect(ui.node("badge").textContent).toBe("Error");
+    ui.notify({ success: false, errorKind: "connection", message: "No Galaxy is connected." });
+    expect(ui.node("badge").hidden).toBe(false);
+    expect(ui.node("badge").textContent).toBe("Not configured");
+  });
+
   it("numbers each item as Galaxy does and names its real datatype, as the upstream card does", async () => {
     const ui = mount(undefined, { initializeResult: { hostCapabilities: { serverTools: {} } } });
     await flush();
