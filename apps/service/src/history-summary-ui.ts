@@ -215,9 +215,9 @@ const HTML = `<!doctype html>
     <div class="history-actions">
       <a id="history-link" class="close-button" target="_blank" rel="noopener noreferrer" title="Open this history in Galaxy (new tab)" hidden>Open history in Galaxy ↗</a>
       <div id="upload-panel" class="upload-panel" hidden>
-        <button id="upload-button" class="close-button" type="button" title="The file goes from this device straight to Galaxy">Upload a file…</button>
+        <button id="upload-button" class="close-button" type="button" title="Files go from this device straight to Galaxy">Upload files…</button>
         <button id="upload-cancel" class="close-button" type="button" hidden>Cancel upload</button>
-        <input id="upload-input" type="file" hidden>
+        <input id="upload-input" type="file" multiple hidden>
         <p id="upload-note" class="caveat" role="status" aria-live="polite" hidden></p>
       </div>
       <p id="history-link-note" class="caveat" role="status" hidden></p>
@@ -332,6 +332,7 @@ const HTML = `<!doctype html>
     let uploadAbort;
     // The last file the person uploaded here, so a later "use the file I just uploaded" can be resolved.
     let lastUpload;
+    let lastUploads; // every file of the last upload, when it was of several
     let uploadNoteHistory;
     let viewContext;
     let lastSentContext;
@@ -473,18 +474,14 @@ const HTML = `<!doctype html>
       }
     }
 
-    async function uploadFile(file) {
-      const history = currentHistory;
-      const source = sourceGalaxy;
-      if (uploadAbort || !toolsAvailable() || !source || !string(history?.id)) return;
-      uploadNoteHistory = string(history.id);
-      if (!file.size) { uploadStatus("This file is empty, so nothing was uploaded."); return; }
-      const abort = uploadAbort = new AbortController();
+    // One file, start to finish. Answers { upload } once Galaxy has it, or why it does not:
+    // "text" for a file sent alone, "why" as a clause for a list of several.
+    async function uploadOne(file, history, source, abort, say) {
       const name = string(file.name) || "upload";
+      if (!file.size) return { name, why: "the file is empty", text: "This file is empty, so nothing was uploaded." };
       const target = { historyId: string(history.id), fileName: name };
-      uploadButton.disabled = true;
       uploadCancel.hidden = false;
-      uploadStatus("Starting the upload of " + name + "…");
+      say("Starting the upload of " + name + "…");
       let stage = "start";
       try {
         const started = await request("tools/call", { name: "start_file_upload", arguments: { ...target, size: file.size } });
@@ -495,24 +492,61 @@ const HTML = `<!doctype html>
         if (abort.signal.aborted) throw new Error("Cancelled");
         stage = "send";
         await sendFile(file, { url: url.href, chunk: Number.isSafeInteger(upload.chunk_bytes) && upload.chunk_bytes > 0 ? upload.chunk_bytes : 10485760 }, abort.signal,
-          sent => uploadStatus("Uploading " + name + " to Galaxy: " + Math.floor(sent / file.size * 100) + "%"));
+          sent => say("Uploading " + name + " to Galaxy: " + Math.floor(sent / file.size * 100) + "%"));
         stage = "finish";
         uploadCancel.hidden = true;
-        uploadStatus("Adding " + name + " to the history…");
+        say("Adding " + name + " to the history…");
         const finished = await request("tools/call", { name: "finish_file_upload", arguments: { ...target, sessionId: string(upload.session_id) } });
         if (finished?.isError || finished?.structuredContent?.success !== true) throw new Error(string(finished?.structuredContent?.message) || "Galaxy did not add the file.");
-        uploadStatus(name + " is in Galaxy, which is now processing it. Tell the assistant when you want to use it.");
-        lastUpload = { file_name: name, dataset_id: string(finished.structuredContent.data?.outputs?.[0]?.id) || null, history_id: string(history.id),
-          uploaded_at: new Date().toISOString(), note: "Uploaded by the user with this card; Galaxy may still be processing it." };
-        if (currentHistory === history && datasetDetail.hidden && !closed) void openHistory(history);
-        else if (viewContext) publishView(viewContext);
+        return { name, upload: { file_name: name, dataset_id: string(finished.structuredContent.data?.outputs?.[0]?.id) || null, history_id: string(history.id),
+          uploaded_at: new Date().toISOString(), note: "Uploaded by the user with this card; Galaxy may still be processing it." } };
       } catch (error) {
+        if (abort.signal.aborted) return { name, cancelled: true };
+        if (stage === "send" && error instanceof TypeError) return { name, blocked: true };
         // One sentence, whether or not the reason came with its own full stop.
-        const reason = fallback => (string(error?.message).replace(/[.\\s]+$/, "") || fallback) + ".";
-        uploadStatus(abort.signal.aborted ? "Upload cancelled. Nothing was added to the history."
-          : stage === "send" && error instanceof TypeError ? "This app did not let the card reach Galaxy. Open the history in Galaxy and upload the file there."
-          : stage === "finish" ? reason("Galaxy did not confirm the file") + " Check the history in Galaxy before uploading again."
-          : reason("The upload failed") + " Nothing was added to the history.");
+        const reason = fallback => string(error?.message).replace(/[.\\s]+$/, "") || fallback;
+        return stage === "finish"
+          ? { name, why: reason("Galaxy did not confirm the file") + "; check the history in Galaxy before uploading it again",
+            text: reason("Galaxy did not confirm the file") + ". Check the history in Galaxy before uploading again." }
+          : { name, why: reason("The upload failed"), text: reason("The upload failed") + ". Nothing was added to the history." };
+      }
+    }
+
+    // The chosen files, one after another, so each has the whole connection and its own outcome.
+    async function uploadFiles(files) {
+      const history = currentHistory;
+      const source = sourceGalaxy;
+      if (uploadAbort || !files.length || !toolsAvailable() || !source || !string(history?.id)) return;
+      uploadNoteHistory = string(history.id);
+      const abort = uploadAbort = new AbortController();
+      const several = files.length > 1;
+      const done = [];
+      const missed = [];
+      let ended = "";
+      uploadButton.disabled = true;
+      try {
+        for (const [index, file] of files.entries()) {
+          const result = await uploadOne(file, history, source, abort, text => uploadStatus((several ? "File " + (index + 1) + " of " + files.length + ": " : "") + text));
+          if (result.upload) done.push(result.upload);
+          else if (result.cancelled) ended = "Upload cancelled.";
+          // A host that keeps this page from Galaxy keeps it from every file.
+          else if (result.blocked) ended = "This app did not let the card reach Galaxy. Open the history in Galaxy and upload the " + (several ? "files" : "file") + " there.";
+          else missed.push(result);
+          if (ended) break;
+        }
+        const them = done.length === 1 ? "it" : "them";
+        const landed = !done.length ? ""
+          : (!several ? done[0].file_name + " is" : done.length === files.length ? "All " + files.length + " files are" : done.length + " of " + files.length + " files " + (done.length === 1 ? "is" : "are"))
+            + " in Galaxy, which is now processing " + them + ". Tell the assistant when you want to use " + them + ".";
+        const nothing = abort.signal.aborted || (several && !ended) ? "Nothing was added to the history." : "";
+        const lost = !several ? missed[0]?.text || "" : missed.length ? "Not uploaded: " + missed.map(each => each.name + " (" + each.why + ")").join("; ") + "." : "";
+        uploadStatus([ended, landed || nothing, lost].filter(Boolean).join(" "));
+        if (done.length) {
+          lastUpload = done[done.length - 1];
+          lastUploads = done;
+          if (currentHistory === history && datasetDetail.hidden && !closed) void openHistory(history);
+          else if (viewContext) publishView(viewContext);
+        }
       } finally {
         uploadAbort = undefined;
         uploadButton.disabled = false;
@@ -522,9 +556,9 @@ const HTML = `<!doctype html>
     uploadButton.addEventListener("click", () => { if (!uploadAbort) uploadInput.click(); });
     uploadCancel.addEventListener("click", () => uploadAbort?.abort());
     uploadInput.addEventListener("change", () => {
-      const file = uploadInput.files?.[0];
+      const files = Array.from(uploadInput.files || []);
       uploadInput.value = "";
-      if (file) void uploadFile(file);
+      if (files.length) void uploadFiles(files);
     });
 
     let sizePending = false;
@@ -589,7 +623,7 @@ const HTML = `<!doctype html>
     });
 
     function publishView(value) {
-      viewContext = { ...value, ...(sourceGalaxy && { galaxy: sourceGalaxy }), ...(lastUpload && { last_upload: lastUpload }), view_id: sourceViewId || null, display_verified: false,
+      viewContext = { ...value, ...(sourceGalaxy && { galaxy: sourceGalaxy }), ...(lastUpload && { last_upload: lastUpload }), ...(lastUploads?.length > 1 && { last_uploads: lastUploads }), view_id: sourceViewId || null, display_verified: false,
         surface: workspaceConnections ? "workspace" : "card",
         scope: workspaceConnections ? "This open Galaxy panel only. Prefer its controls; do not create a card for each lookup. Content loading does not verify visible display."
           : "This card only, not other tool calls or the user's workspace. Content loading does not verify visible display." };

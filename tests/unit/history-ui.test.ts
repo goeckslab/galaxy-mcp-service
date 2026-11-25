@@ -130,8 +130,8 @@ function mount(initial?: unknown, options: { initialize?: boolean; initializeRes
     pending: () => runInContext("pending.size", context) as number,
     /** A network failure as the page's own script sees it. */
     networkError: () => runInContext('new TypeError("Failed to fetch")', context) as Error,
-    choose: (file: unknown) => {
-      Object.assign(nodes.get("upload-input")!, { files: [file] });
+    choose: (...files: unknown[]) => {
+      Object.assign(nodes.get("upload-input")!, { files });
       return nodes.get("upload-input")!.listeners.get("change")?.({ preventDefault() {} });
     },
     notify: (value: unknown) => emit("message", { source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: value } } }),
@@ -564,7 +564,7 @@ describe("history result browser", () => {
     const galaxy = { instance: "us", url: "https://usegalaxy.example" };
     const history = { success: true, data: items(1), history_id: "h1", history_name: "RNA-seq", galaxy };
     const upload = { url: "https://usegalaxy.example/api/upload/resumable_upload/0123456789abcdef", session_id: "0123456789abcdef", chunk_bytes: 10 };
-    const file = (size: number) => ({ name: "counts.tsv", size, slice: (start: number, end: number) => ({ bytes: Math.min(size, end) - start }) });
+    const file = (size: number, name = "counts.tsv") => ({ name, size, slice: (start: number, end: number) => ({ bytes: Math.min(size, end) - start }) });
     const tools = (ui: ReturnType<typeof mount>) => ui.calls.filter(call => call.method === "tools/call").map(call => [call.params?.name, call.params?.arguments]);
     const reply = (started: unknown = { success: true, galaxy, upload }) => (rpc: Rpc) => ({ structuredContent:
       rpc.params?.name === "start_file_upload" ? started
@@ -678,6 +678,64 @@ describe("history result browser", () => {
       expect(sent).toEqual(["0"]);
       expect(ui.node("upload-note").textContent).toBe("Upload cancelled. Nothing was added to the history.");
       expect(tools(ui).map(([name]) => name)).toEqual(["start_file_upload"]);
+    });
+
+    describe("of several files", () => {
+      const sending = () => async () => ({ status: 204, ok: true, headers: { get: () => null } });
+
+      it("sends them one after another, reloads the history once, and tells the assistant about each", async () => {
+        const ui = mount(history, { reply: reply(), initializeResult: { hostCapabilities: { serverTools: {}, updateModelContext: {} } }, fetch: sending() });
+        await flush();
+        await ui.choose(file(15, "a.tsv"), file(5, "b.tsv"));
+        await settle();
+        await settle();
+        expect(tools(ui).map(([name, args]) => [name, (args as { fileName?: string }).fileName])).toEqual([
+          ["start_file_upload", "a.tsv"], ["finish_file_upload", "a.tsv"], ["start_file_upload", "b.tsv"], ["finish_file_upload", "b.tsv"],
+          ["get_history_contents", undefined],
+        ]);
+        expect(ui.node("upload-note").textContent).toBe("All 2 files are in Galaxy, which is now processing them. Tell the assistant when you want to use them.");
+        expect(ui.calls.filter(call => call.method === "ui/update-model-context").at(-1)?.params?.structuredContent).toMatchObject({
+          last_upload: { file_name: "b.tsv" }, last_uploads: [{ file_name: "a.tsv", history_id: "h1" }, { file_name: "b.tsv", history_id: "h1" }],
+        });
+        expect(ui.node("upload-button").disabled).toBe(false);
+      });
+
+      it("goes on past a file that fails, and names it with the reason", async () => {
+        const ui = mount(history, { reply: reply(), fetch: sending() });
+        await flush();
+        await ui.choose(file(15, "a.tsv"), file(0, "empty.tsv"), file(5, "c.tsv"));
+        await settle();
+        await settle();
+        expect(tools(ui).filter(([name]) => name === "finish_file_upload").map(([, args]) => (args as { fileName: string }).fileName)).toEqual(["a.tsv", "c.tsv"]);
+        expect(ui.node("upload-note").textContent).toBe(
+          "2 of 3 files are in Galaxy, which is now processing them. Tell the assistant when you want to use them. Not uploaded: empty.tsv (the file is empty).");
+      });
+
+      it("says which file it is on, and stops at the one being sent when cancelled", async () => {
+        const ui = mount(history, { reply: reply(), fetch: (_url, init) => init.headers["Upload-Offset"] === "0" && ui.node("upload-note").textContent.startsWith("File 1")
+          ? Promise.resolve({ status: 204, ok: true, headers: { get: () => null } })
+          : new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(ui.networkError()))) });
+        await flush();
+        void ui.choose(file(5, "a.tsv"), file(5, "b.tsv"), file(5, "c.tsv"));
+        await settle();
+        await settle();
+        expect(ui.node("upload-note").textContent).toBe("File 2 of 3: Starting the upload of b.tsv…");
+        await ui.node("upload-cancel").click();
+        await settle();
+        expect(ui.node("upload-note").textContent).toBe("Upload cancelled. 1 of 3 files is in Galaxy, which is now processing it. Tell the assistant when you want to use it.");
+        expect(tools(ui).map(([name, args]) => [name, (args as { fileName?: string }).fileName])).toEqual([
+          ["start_file_upload", "a.tsv"], ["finish_file_upload", "a.tsv"], ["start_file_upload", "b.tsv"], ["get_history_contents", undefined],
+        ]);
+      });
+
+      it("stops at the first file when the host keeps the card from Galaxy", async () => {
+        const ui = mount(history, { reply: reply(), fetch: async () => { throw ui.networkError(); } });
+        await flush();
+        await ui.choose(file(5, "a.tsv"), file(5, "b.tsv"));
+        await settle();
+        expect(ui.node("upload-note").textContent).toBe("This app did not let the card reach Galaxy. Open the history in Galaxy and upload the files there.");
+        expect(tools(ui).map(([name]) => name)).toEqual(["start_file_upload"]);
+      });
     });
   });
 
