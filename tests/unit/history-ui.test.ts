@@ -204,7 +204,7 @@ describe("history result browser", () => {
     for (const result of [{ status: "connected", histories: data }, { success: true, data }]) {
       ui.notify(result);
       expect(ui.node("histories").children).toHaveLength(5);
-      expect(badges(ui.node("histories")).map(node => node.textContent)).toEqual(["Ready", "Failed"]);
+      expect(badges(ui.node("histories")).map(node => node.textContent)).toEqual(["ok", "error"]);
     }
     await ui.node("histories").children[3]!.children[0]!.click();
     await flush();

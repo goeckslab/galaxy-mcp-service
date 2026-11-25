@@ -63,14 +63,14 @@ const HTML = `<!doctype html>
     ul { display: grid; gap: 0; margin: 16px 0 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
     li { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-width: 0; padding: 12px 4px; border-bottom: 1px solid var(--line); background: transparent; }
     .summary { min-width: 0; }
-    .state { margin-top: 4px; color: var(--secondary); font-size: .76rem; text-transform: capitalize; }
+    .state { margin-top: 4px; color: var(--secondary); font-size: .76rem; }
     .state[data-state="error"], .state[data-state="failed"] { color: var(--danger); }
     .meta { display: grid; flex: none; gap: 3px; overflow-wrap: anywhere; text-align: right; font-size: .72rem; line-height: 1.25; }
     li[data-view="content"] { justify-content: flex-start; }
     .kind { display: grid; flex: none; width: 36px; height: 36px; place-items: center; border-radius: 8px; background: var(--row); color: var(--secondary); font: 600 .6rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
     .detail { margin-top: 3px; color: var(--secondary); font-size: .75rem; }
     .hid { margin-right: 6px; color: var(--secondary); font-weight: 400; font-variant-numeric: tabular-nums; }
-    .status { color: var(--secondary); font-size: .76rem; font-weight: 500; text-transform: capitalize; }
+    .status { color: var(--secondary); font-size: .76rem; font-weight: 500; }
     .status[data-state="error"] { color: var(--danger); }
     li[data-view="content"] .meta { margin-left: auto; }
     li[data-clickable="true"] { padding: 0; }
@@ -308,7 +308,9 @@ const HTML = `<!doctype html>
       const date = new Date(/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(value) ? value : value + "Z");
       return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
     };
-    const stateLabels = { ok: "Ready", new: "Preparing", upload: "Uploading", queued: "Queued", running: "Running", waiting: "Waiting", paused: "Paused", error: "Failed", failed: "Failed", discarded: "Discarded", deleted: "Deleted", empty: "Empty", setting_metadata: "Preparing metadata" };
+    // A state under the name Galaxy's own history panel gives it
+    // (client/src/components/History/Content/model/states.ts in galaxyproject/galaxy).
+    const stateLabels = { ok: "ok", empty: "empty", new: "new", queued: "queued", running: "running", setting_metadata: "setting metadata", upload: "uploading", deferred: "deferred", paused: "paused", discarded: "discarded", error: "error", failed_metadata: "failed metadata", failed: "failed", waiting: "waiting", deleted: "deleted" };
     const stateLabel = value => Object.hasOwn(stateLabels, string(value).toLowerCase()) ? stateLabels[string(value).toLowerCase()] : "";
     const pending = new Map();
     let nextRequestId = 1;
