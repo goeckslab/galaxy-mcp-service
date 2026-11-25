@@ -158,6 +158,21 @@ const historyResult = { status: "connected", histories: [{ id: "private-history"
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("history result browser", () => {
+  it("numbers each item as Galaxy does and names its real datatype, as the upstream card does", async () => {
+    const ui = mount(undefined, { initializeResult: { hostCapabilities: { serverTools: {} } } });
+    await flush();
+    ui.notify({ success: true, data: [
+      { id: "d1", hid: 24, name: "MultiQC report", history_content_type: "dataset", extension: "html", state: "ok" },
+      { id: "d2", hid: 20, name: "Trimmed reads", history_content_type: "dataset", extension: "fastqsanger.gz", state: "ok", visible: false },
+      { id: "c1", hid: 22, name: "Alignments", history_content_type: "dataset_collection", collection_type: "list", element_count: 6 },
+    ] });
+    const find = (node: Element, className: string): Element[] => [...(node.className === className ? [node] : []), ...node.children.flatMap(child => find(child, className))];
+    const rows = ui.node("histories").children;
+    expect(rows.map(row => find(row, "hid")[0]?.textContent)).toEqual(["24:", "20:", "22:"]);
+    expect(rows.map(row => find(row, "kind")[0]?.textContent)).toEqual(["HTML", "FASTQ", "SET"]);
+    expect(rows.map(row => find(row, "detail")[0]?.textContent)).toEqual(["html", "fastqsanger.gz \u00b7 hidden", "list, 6 elements"]);
+  });
+
   it.each([false, true])("only displays known history and dataset states (standard host=%s)", async standardHost => {
     const data = [undefined, null, "unknown", "ok", "error"].map((state, index) => ({ ...items(1, index)[0], state, extension: "bam" }));
     const badges = (node: Element): Element[] => [

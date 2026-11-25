@@ -69,6 +69,7 @@ const HTML = `<!doctype html>
     li[data-view="content"] { justify-content: flex-start; }
     .kind { display: grid; flex: none; width: 36px; height: 36px; place-items: center; border-radius: 8px; background: var(--row); color: var(--secondary); font: 600 .6rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
     .detail { margin-top: 3px; color: var(--secondary); font-size: .75rem; }
+    .hid { margin-right: 6px; color: var(--secondary); font-weight: 400; font-variant-numeric: tabular-nums; }
     .status { color: var(--secondary); font-size: .76rem; font-weight: 500; text-transform: capitalize; }
     .status[data-state="error"] { color: var(--danger); }
     li[data-view="content"] .meta { margin-left: auto; }
@@ -855,17 +856,16 @@ const HTML = `<!doctype html>
       publishView({ view: "histories", report_status: "not_open", visible_count: rows.length });
     }
 
+    // The tile and the line under a name, as the upstream galaxy-mcp card writes them.
     function contentKind(value) {
-      const contentType = string(value.history_content_type || value.type).toLowerCase();
       const extension = string(value.extension || value.file_ext).toLowerCase();
-      if (contentType.includes("collection")) return { format: "SET", label: "Dataset collection", tone: "report" };
-      if (/fastq|fasta|bam|sam|vcf/.test(extension)) {
-        const format = extension.startsWith("fastq") ? "FASTQ" : extension.startsWith("fasta") ? "FASTA" : extension.toUpperCase();
-        return { format, label: "Sequencing data", tone: "data" };
+      if (string(value.history_content_type || value.type).toLowerCase().includes("collection")) {
+        const elements = typeof value.element_count === "number" ? ", " + value.element_count + " elements" : "";
+        return { format: "SET", detail: (string(value.collection_type) || "collection") + elements };
       }
-      if (extension === "html") return { format: "HTML", label: "Visual report", tone: "report" };
-      if (/txt|tabular|csv|tsv/.test(extension)) return { format: extension === "tabular" ? "TABLE" : extension.toUpperCase(), label: "Raw result", tone: "raw" };
-      return { format: extension ? extension.slice(0, 6).toUpperCase() : "DATA", label: "Dataset", tone: "data" };
+      const format = /^fast[aq]/.test(extension) ? extension.slice(0, 5).toUpperCase()
+        : extension === "tabular" ? "TABLE" : extension.slice(0, 6).toUpperCase() || "DATA";
+      return { format, detail: [extension, value.deleted === true ? "deleted" : "", value.visible === false ? "hidden" : ""].filter(Boolean).join(" \u00b7 ") };
     }
 
     function renderContents(data, keepDetail = false) {
@@ -922,18 +922,26 @@ const HTML = `<!doctype html>
 
         row.dataset.view = "content";
         kind.className = "kind";
-        kind.dataset.kind = descriptor.tone;
         kind.textContent = descriptor.format;
-        kind.setAttribute("aria-label", descriptor.label);
+        kind.setAttribute("aria-hidden", "true");
         summary.className = "summary";
-        name.textContent = string(value.name) || "Untitled dataset";
+        const label = string(value.name) || "Untitled dataset";
+        name.textContent = label;
+        // The item's number in its history, before its name, as Galaxy lists it.
+        if (typeof value.hid === "number") {
+          const hid = document.createElement("span");
+          hid.className = "hid";
+          hid.textContent = value.hid + ":";
+          name.prepend(hid);
+        }
         detail.className = "detail";
-        detail.textContent = descriptor.label;
+        detail.textContent = descriptor.detail;
         meta.className = "meta";
         state.className = "status";
         state.dataset.state = stateValue === "ok" ? "ok" : ["error", "failed", "discarded"].includes(stateValue) ? "error" : "neutral";
         state.textContent = stateLabel(stateValue);
-        summary.append(name, detail);
+        summary.append(name);
+        if (detail.textContent) summary.append(detail);
         if (state.textContent) meta.append(state);
         if (canOpen) {
           const view = document.createElement("span");
@@ -944,7 +952,7 @@ const HTML = `<!doctype html>
           button.className = "content-button";
           button.type = "button";
           button.disabled = !toolsAvailable();
-          button.setAttribute("aria-label", "View contents of " + name.textContent);
+          button.setAttribute("aria-label", "View contents of " + label);
           button.dataset.datasetId = string(value.id);
           button.setAttribute("aria-expanded", String(value.id === selectedId));
           if (value.id === selectedId) activeContentButton = button;
