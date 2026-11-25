@@ -173,8 +173,12 @@ const HTML = `<!doctype html>
     @media (max-width: 759px) { .workspace[data-detail-open="true"][data-files-visible="true"] #dataset-detail { display: none; } }
     @media (pointer: coarse) { .workspace .close-button, .workspace .workspace-nav select { min-height: 44px; } .workspace .workspace-nav select { font-size: 1rem; } }
     @media (max-width: 520px) { body { padding: 4px; } .card { padding: 12px; border-radius: 14px; } header { flex-wrap: wrap; gap: 8px; } li, .content-button { align-items: flex-start; } .meta { max-width: 42%; } .statistics { grid-template-columns: 1fr; } }
-    .upload-panel { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-    .upload-panel .caveat { flex-basis: 100%; margin: 0; }
+    /* One row for what can be done with the open history; the upload panel's own controls sit in it. */
+    .history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+    .history-actions:not(:has(> :not([hidden]))) { display: none; }
+    .history-actions #history-link { margin-top: 0; }
+    .history-actions .caveat { flex-basis: 100%; margin: 0; }
+    .upload-panel { display: contents; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -208,13 +212,15 @@ const HTML = `<!doctype html>
       <button id="workspace-file-list" class="close-button" type="button" aria-controls="file-list-panel" aria-expanded="false" hidden>Show file list</button>
     </nav>
     <h2 id="workspace-history-title" class="workspace-history-title" hidden></h2>
-    <a id="history-link" class="close-button" target="_blank" rel="noopener noreferrer" title="Open this history in Galaxy (new tab)" hidden>Open history in Galaxy ↗</a>
-    <p id="history-link-note" class="caveat" role="status" hidden></p>
-    <div id="upload-panel" class="upload-panel" hidden>
-      <button id="upload-button" class="close-button" type="button" title="The file goes from this device straight to Galaxy">Upload a file…</button>
-      <button id="upload-cancel" class="close-button" type="button" hidden>Cancel upload</button>
-      <input id="upload-input" type="file" hidden>
-      <p id="upload-note" class="caveat" role="status" aria-live="polite" hidden></p>
+    <div class="history-actions">
+      <a id="history-link" class="close-button" target="_blank" rel="noopener noreferrer" title="Open this history in Galaxy (new tab)" hidden>Open history in Galaxy ↗</a>
+      <div id="upload-panel" class="upload-panel" hidden>
+        <button id="upload-button" class="close-button" type="button" title="The file goes from this device straight to Galaxy">Upload a file…</button>
+        <button id="upload-cancel" class="close-button" type="button" hidden>Cancel upload</button>
+        <input id="upload-input" type="file" hidden>
+        <p id="upload-note" class="caveat" role="status" aria-live="polite" hidden></p>
+      </div>
+      <p id="history-link-note" class="caveat" role="status" hidden></p>
     </div>
     <p id="message" class="message" role="status" aria-live="polite">Waiting for Galaxy…</p>
     <button id="view-reconnect" class="close-button" type="button" hidden>Reconnect view</button>
