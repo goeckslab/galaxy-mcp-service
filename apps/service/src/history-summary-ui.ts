@@ -308,10 +308,9 @@ const HTML = `<!doctype html>
       const date = new Date(/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(value) ? value : value + "Z");
       return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
     };
-    // A state under the name Galaxy's own history panel gives it
-    // (client/src/components/History/Content/model/states.ts in galaxyproject/galaxy).
-    const stateLabels = { ok: "ok", empty: "empty", new: "new", queued: "queued", running: "running", setting_metadata: "setting metadata", upload: "uploading", deferred: "deferred", paused: "paused", discarded: "discarded", error: "error", failed_metadata: "failed metadata", failed: "failed", waiting: "waiting", deleted: "deleted" };
-    const stateLabel = value => Object.hasOwn(stateLabels, string(value).toLowerCase()) ? stateLabels[string(value).toLowerCase()] : "";
+    // A state is shown in Galaxy's own word for it, the one the assistant reads too; anything else is left out.
+    const knownStates = new Set(["ok", "empty", "new", "queued", "running", "setting_metadata", "upload", "deferred", "paused", "discarded", "error", "failed_metadata", "failed", "waiting", "deleted"]);
+    const stateLabel = value => knownStates.has(string(value).toLowerCase()) ? string(value).toLowerCase() : "";
     const pending = new Map();
     let nextRequestId = 1;
     let detailRequestId = 0;
