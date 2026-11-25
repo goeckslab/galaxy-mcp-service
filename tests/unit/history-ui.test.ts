@@ -211,6 +211,18 @@ describe("history result browser", () => {
     expect(ui.node("detail-body").querySelector("dl")?.children.map(node => node.querySelector("dt")?.textContent)).toEqual(["Format", "Size"]);
   });
 
+  it("colours a dataset's state as done, at work or failed, and leaves the rest plain", async () => {
+    const states = ["ok", "running", "upload", "queued", "error"];
+    const ui = mount({ success: true, data: states.map((state, index) => ({ ...items(1, index)[0], state })) });
+    await flush();
+    const shown = ui.node("histories").children.map(row => {
+      const find = (node: Element): Element | undefined => node.className === "status" ? node : node.children.map(find).find(Boolean);
+      const status = find(row)!;
+      return [status.textContent, status.dataset.state];
+    });
+    expect(shown).toEqual([["ok", "ok"], ["running", "running"], ["upload", "running"], ["queued", "neutral"], ["error", "error"]]);
+  });
+
   it("previews PDF pages, images, tables and JSON in one viewer, and falls back to Galaxy peek for binary data", async () => {
     const galaxy = { instance: "us", url: "https://usegalaxy.org" };
     const formats = ["pdf", "png", "csv", "json", "bam"];

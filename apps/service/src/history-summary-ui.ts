@@ -24,6 +24,7 @@ const HTML = `<!doctype html>
       --accent: light-dark(#18181b, #f4f4f5);
       --strong: light-dark(rgba(0, 0, 0, .16), rgba(255, 255, 255, .2));
       --success: light-dark(#248a3d, #30d158);
+      --busy: light-dark(#9a6700, #ffd60a);
       --danger: light-dark(#d70015, #ff453a);
       --purple: light-dark(#8944ab, #bf5af2);
       --orange: light-dark(#c93400, #ff9f0a);
@@ -71,6 +72,9 @@ const HTML = `<!doctype html>
     .detail { margin-top: 1px; color: var(--secondary); font-size: .75rem; }
     .hid { margin-right: 6px; color: var(--secondary); font-weight: 400; font-variant-numeric: tabular-nums; }
     .status { color: var(--secondary); font-size: .76rem; font-weight: 500; }
+    /* A dataset's state in the colour Galaxy's history panel gives it: done, at work, failed. */
+    .status[data-state="ok"] { color: var(--success); }
+    .status[data-state="running"] { color: var(--busy); }
     .status[data-state="error"] { color: var(--danger); }
     li[data-view="content"] .meta { margin-left: auto; }
     li[data-clickable="true"] { padding: 0; }
@@ -984,7 +988,8 @@ const HTML = `<!doctype html>
         detail.textContent = descriptor.detail;
         meta.className = "meta";
         state.className = "status";
-        state.dataset.state = stateValue === "ok" ? "ok" : ["error", "failed", "discarded"].includes(stateValue) ? "error" : "neutral";
+        state.dataset.state = stateValue === "ok" ? "ok" : ["error", "failed", "discarded"].includes(stateValue) ? "error"
+          : ["running", "setting_metadata", "upload"].includes(stateValue) ? "running" : "neutral";
         state.textContent = stateLabel(stateValue);
         summary.append(name);
         if (detail.textContent) summary.append(detail);
