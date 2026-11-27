@@ -647,7 +647,7 @@ function registerGalaxyOperation(server: McpServer, operation: AnyOperation, con
     name,
     {
       description: operation.name === "get_history_contents"
-        ? (rendersHistoryContents ? "Show one interactive history card for user browsing; prefer this over separate cards for each dataset. " : "Read history data without creating a card. Use for intermediate lookups and report discovery; show_history is the separate presentation action. ") + "Return compact dataset/collection summaries or find candidates by name/format. Hidden and deleted items are left out unless asked for, as in Galaxy's history panel. Filtered lookup inspects at most 500 items per call; continue from pagination.next_offset with the same filters. A partial or empty page does not prove absence or uniqueness. Use show_dataset only when a standalone report card is needed."
+        ? (rendersHistoryContents ? "Show one interactive history card: when the user wants to browse a history, and once in your final reply after an analysis you ran, for its results. Prefer this over separate cards for each dataset. " : "Read history data without creating a card. Use for intermediate lookups and report discovery; show_history is the separate presentation action. ") + "Return compact dataset/collection summaries or find candidates by name/format. Hidden and deleted items are left out unless asked for, as in Galaxy's history panel. Filtered lookup inspects at most 500 items per call; continue from pagination.next_offset with the same filters. A partial or empty page does not prove absence or uniqueness. Use show_dataset only when a standalone report card is needed."
         : operation.name === "get_dataset_details"
           ? "Read a known dataset's metadata and Galaxy-generated peek summary when available. Useful for binary, oversized or specialized datatypes. This is not full-file evidence; use read_dataset_report for supported content or open the original in Galaxy."
           : name === "run_tool" ? `${operation.summary} Give purpose, a few words on why, so the reason is saved on the outputs.`
@@ -693,7 +693,7 @@ export function createGalaxyMcpHandler(
         // The same mark as the cards, so clients don't fall back to another site's favicon.
         ...(uiDomain && { icons: [{ src: `${uiDomain}/favicon.png`, mimeType: "image/png", sizes: ["256x256"] }] }),
       }, {
-        instructions: "Galaxy tools work without UI. Use get_galaxy_connections; keep instance with handles. No transfers without consent. Reads are card-free. show_galaxy opens a panel; prefer controls or one show_* per reply, never per poll. Display is unconfirmed. Read evidence: get_dataset_text or read_dataset_report. Use names, disclose gaps. Inspect inputs; submit once, monitor. Events are opt-in for an existing run, not result validation. Management links on request. Confirm destructive actions. Never expose credentials.",
+        instructions: "Galaxy tools work without UI. Use get_galaxy_connections; keep instance with handles. No transfers without consent. Reads are card-free. show_galaxy opens a panel. Show a submitted run and results (show_*), never per poll. Display is unconfirmed. Read evidence: get_dataset_text or read_dataset_report. Use names, disclose gaps. Inspect inputs; submit once, monitor. Events are opt-in for an existing run, not result validation. Management links on request. Confirm destructive actions. Never expose credentials.",
       });
       acceptSnakeCaseNames(server);
       useToolTitles(server);
@@ -795,7 +795,7 @@ export function createGalaxyMcpHandler(
       for (const name of ["get_run_status", "show_run_status"]) server.registerTool(
         name,
         {
-          description: (name === "show_run_status" ? "Show one status card for an existing analysis when the user needs visible progress; it can refresh in place. " : "Read an existing analysis status without creating a card. Use for background monitoring and verification; show_run_status is the separate presentation action. ") + "Refreshing never submits, cancels, or retries an analysis. Completed means execution succeeded, not that the scientific result has been validated.",
+          description: (name === "show_run_status" ? "Show one status card for an analysis: once right after you submit it, or when the user asks about progress. It refreshes in place, so do not show it again for the same run. " : "Read an existing analysis status without creating a card. Use for background monitoring and verification; show_run_status is the separate presentation action. ") + "Refreshing never submits, cancels, or retries an analysis. Completed means execution succeeded, not that the scientific result has been validated.",
           inputSchema: runStatusInput.extend(instanceInput),
           outputSchema: runStatusOutput.extend(sourceOutput),
           annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
